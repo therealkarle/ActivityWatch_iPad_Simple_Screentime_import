@@ -267,38 +267,6 @@ def build_planning_windows(
                 f"backup:{minutes_to_clock_label(start_minute)}-{minutes_to_clock_label(end_minute)}",
             )
         )
-
-    relevant_backups = [
-        (max(wake_up_time, start_minute), min(24 * 60, end_minute))
-        for start_minute, end_minute in backup_intervals
-        if end_minute > wake_up_time
-    ]
-    relevant_backups.sort()
-
-    cursor = wake_up_time
-    for start_minute, end_minute in relevant_backups:
-        if start_minute > cursor:
-            windows.append(
-                build_time_window(
-                    day_start,
-                    cursor,
-                    start_minute,
-                    f"fallback:{minutes_to_clock_label(cursor)}-{minutes_to_clock_label(start_minute)}",
-                )
-            )
-        cursor = max(cursor, end_minute)
-
-    if cursor < 24 * 60:
-        windows.append(
-            build_time_window(
-                day_start,
-                cursor,
-                24 * 60,
-                f"fallback:{minutes_to_clock_label(cursor)}-24:00",
-            )
-        )
-
-    # Drop any zero-length windows from degenerate configurations.
     return [window for window in windows if window.capacity_seconds > 0]
 
 
@@ -307,24 +275,14 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
         return []
 
     total_duration = sum(entry.duration_seconds for entry in entries)
-    total_capacity = sum(window.capacity_seconds for window in windows)
     log_debug(debug, f"Total screentime: {total_duration} seconds")
-    log_debug(debug, f"Available window capacity: {total_capacity} seconds")
-
-    if total_duration > total_capacity:
-        raise ValueError(
-            "The configured time windows do not provide enough capacity for the day "
-            f"({total_duration} seconds required, {total_capacity} seconds available)."
-        )
 
     segments: list[PlannedSegment] = []
     remaining_entries: list[dict[str, Any]] = [
         {"app_name": entry.app_name, "remaining_seconds": entry.duration_seconds}
         for entry in entries
     ]
-    future_capacity_ceiling = [0] * (len(windows) + 1)
-    for index in range(len(windows) - 1, -1, -1):
-        future_capacity_ceiling[index] = max(windows[index].capacity_seconds, future_capacity_ceiling[index + 1])
+    last_event_end: datetime | None = None
 
     for window_index, window in enumerate(windows):
         window_remaining = window.capacity_seconds
@@ -333,6 +291,8 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
         while window_remaining > 0 and remaining_entries:
             current_entry = remaining_entries[0]
             current_remaining = int(current_entry["remaining_seconds"])
+            window_is_primary = window.label.startswith("primary:")
+            window_is_backup = window.label.startswith("backup:")
 
             if current_remaining <= window_remaining:
                 segments.append(
@@ -351,40 +311,52 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
                 )
                 continue
 
-            fitting_candidates = [
-                (index, int(entry["remaining_seconds"]))
-                for index, entry in enumerate(remaining_entries[1:], start=1)
-                if int(entry["remaining_seconds"]) <= window_remaining
-            ]
+            if window_is_primary:
+                fitting_candidates = [
+                    (index, int(entry["remaining_seconds"]))
+                    for index, entry in enumerate(remaining_entries[1:], start=1)
+                    if int(entry["remaining_seconds"]) <= window_remaining
+                ]
 
-            if fitting_candidates:
-                candidate_index, candidate_seconds = min(
-                    fitting_candidates,
-                    key=lambda item: (item[1], item[0]),
-                )
-                candidate_entry = remaining_entries.pop(candidate_index)
-                segments.append(
-                    PlannedSegment(
-                        app_name=str(candidate_entry["app_name"]),
-                        start=cursor,
-                        duration_seconds=candidate_seconds,
+                if fitting_candidates:
+                    candidate_index, candidate_seconds = min(
+                        fitting_candidates,
+                        key=lambda item: (item[1], item[0]),
                     )
-                )
-                cursor += timedelta(seconds=candidate_seconds)
-                window_remaining -= candidate_seconds
-                log_debug(
-                    debug,
-                    f"Filled gap in {window.label} with later block: {candidate_entry['app_name']} ({candidate_seconds}s)",
-                )
-                continue
+                    candidate_entry = remaining_entries.pop(candidate_index)
+                    segments.append(
+                        PlannedSegment(
+                            app_name=str(candidate_entry["app_name"]),
+                            start=cursor,
+                            duration_seconds=candidate_seconds,
+                        )
+                    )
+                    cursor += timedelta(seconds=candidate_seconds)
+                    window_remaining -= candidate_seconds
+                    last_event_end = cursor
+                    log_debug(
+                        debug,
+                        f"Filled gap in {window.label} with later block: {candidate_entry['app_name']} ({candidate_seconds}s)",
+                    )
+                    continue
 
-            if current_remaining <= future_capacity_ceiling[window_index + 1]:
+                future_can_hold_current = any(
+                    future_window.capacity_seconds >= current_remaining
+                    for future_window in windows[window_index + 1 :]
+                )
+                if future_can_hold_current:
+                    log_debug(
+                        debug,
+                        f"Left gap open in {window.label} so block can stay intact later: "
+                        f"{current_entry['app_name']} ({current_remaining}s)",
+                    )
+                    break
+            elif window_is_backup:
                 log_debug(
                     debug,
-                    f"Left gap open in {window.label} so block can stay intact later: "
+                    f"Backup window will split current block instead of deferring it: "
                     f"{current_entry['app_name']} ({current_remaining}s)",
                 )
-                break
 
             split_seconds = min(current_remaining, window_remaining)
             segments.append(
@@ -396,6 +368,7 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
             )
             cursor += timedelta(seconds=split_seconds)
             window_remaining -= split_seconds
+            last_event_end = cursor
             current_entry["remaining_seconds"] = current_remaining - split_seconds
             log_debug(
                 debug,
@@ -403,6 +376,24 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
             )
             if int(current_entry["remaining_seconds"]) <= 0:
                 remaining_entries.pop(0)
+
+    spill_cursor = last_event_end or windows[0].start
+    while remaining_entries:
+        current_entry = remaining_entries.pop(0)
+        current_remaining = int(current_entry["remaining_seconds"])
+        segments.append(
+            PlannedSegment(
+                app_name=str(current_entry["app_name"]),
+                start=spill_cursor,
+                duration_seconds=current_remaining,
+            )
+        )
+        spill_cursor += timedelta(seconds=current_remaining)
+        last_event_end = spill_cursor
+        log_debug(
+            debug,
+            f"Spillover continuation from last event end: {current_entry['app_name']} ({current_remaining}s)",
+        )
 
     return segments
 

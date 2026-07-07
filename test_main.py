@@ -20,8 +20,8 @@ class PlannerTests(unittest.TestCase):
     def test_plan_entries_prefers_later_full_window_over_split(self) -> None:
         day = datetime(2026, 7, 7, tzinfo=timezone.utc)
         windows = [
-            main.TimeWindow("w1", day, day + timedelta(minutes=10)),
-            main.TimeWindow("w2", day + timedelta(minutes=20), day + timedelta(minutes=35)),
+            main.TimeWindow("primary:00:00-00:10", day, day + timedelta(minutes=10)),
+            main.TimeWindow("backup:00:20-00:35", day + timedelta(minutes=20), day + timedelta(minutes=35)),
         ]
         entries = [
             main.ParsedEntry("AppA", 5 * 60),
@@ -55,8 +55,8 @@ class PlannerTests(unittest.TestCase):
     def test_plan_entries_fills_gap_with_later_block_without_forcing_split(self) -> None:
         day = datetime(2026, 7, 7, tzinfo=timezone.utc)
         windows = [
-            main.TimeWindow("w1", day, day + timedelta(minutes=10)),
-            main.TimeWindow("w2", day + timedelta(minutes=30), day + timedelta(minutes=60)),
+            main.TimeWindow("primary:00:00-00:10", day, day + timedelta(minutes=10)),
+            main.TimeWindow("backup:00:30-01:00", day + timedelta(minutes=30), day + timedelta(minutes=60)),
         ]
         entries = [
             main.ParsedEntry("AppA", 15 * 60),
@@ -93,6 +93,31 @@ class PlannerTests(unittest.TestCase):
             if previous_end is not None:
                 self.assertGreaterEqual(event.timestamp, previous_end)
             previous_end = event.timestamp + event.duration
+
+    def test_backup_window_splits_head_block_and_spillover_continues_from_last_event_end(self) -> None:
+        day = datetime(2026, 7, 7, tzinfo=main.LOCAL_TIMEZONE)
+        entries = [
+            main.ParsedEntry("AppA", 8 * 60),
+            main.ParsedEntry("AppB", 3 * 60),
+        ]
+
+        app_events, _ = main.create_events_for_day(
+            "2026-07-07",
+            entries,
+            start_time=0,
+            wake_up_time=5,
+            backup_intervals=[(20, 25)],
+        )
+
+        self.assertEqual(
+            [(event.data["app"], event.timestamp, event.duration) for event in app_events],
+            [
+                ("AppB", day, timedelta(minutes=3)),
+                ("AppA", day + timedelta(minutes=3), timedelta(minutes=2)),
+                ("AppA", day + timedelta(minutes=20), timedelta(minutes=5)),
+                ("AppA", day + timedelta(minutes=25), timedelta(minutes=1)),
+            ],
+        )
 
 
 if __name__ == "__main__":

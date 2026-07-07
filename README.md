@@ -77,8 +77,8 @@ Window planning works like this:
 1. The importer first fills the main window from `start_time` to `wake_up_time`
 2. Then it tries the configured `backup_intervals` in the order you listed them
 3. If a block does not fit in the current window, the planner prefers a later window that can hold it completely
-4. Only if no later window can hold the block intact does it split that block
-5. Remaining time falls back into the rest of the day after `wake_up_time`
+4. Backup windows split the current block instead of pushing it to the next morning block
+5. If there is still screentime left after all configured windows, the importer continues immediately after the last imported event
 
 To reset the importer state on Windows, run:
 
