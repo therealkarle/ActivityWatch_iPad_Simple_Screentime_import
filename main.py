@@ -294,9 +294,9 @@ def create_events_for_day(day_text: str, entries: Iterable[ParsedEntry]) -> tupl
         duration = timedelta(seconds=entry.duration_seconds)
         app_events.append(
             Event(
-                current_start,
-                duration,
-                {
+                timestamp=current_start,
+                duration=duration,
+                data={
                     "app": entry.app_name,
                     "title": entry.app_name,
                     "usage_seconds": entry.duration_seconds,
@@ -304,7 +304,11 @@ def create_events_for_day(day_text: str, entries: Iterable[ParsedEntry]) -> tupl
             )
         )
         afk_events.append(
-            Event(current_start, duration, {"status": "not-afk"})
+            Event(
+                timestamp=current_start,
+                duration=duration,
+                data={"status": "not-afk"},
+            )
         )
         current_start += duration
 
