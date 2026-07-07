@@ -4,7 +4,6 @@ import inspect
 import json
 import re
 import sys
-from functools import lru_cache
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -307,8 +306,7 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
     if not entries or not windows:
         return []
 
-    durations = [entry.duration_seconds for entry in entries]
-    total_duration = sum(durations)
+    total_duration = sum(entry.duration_seconds for entry in entries)
     total_capacity = sum(window.capacity_seconds for window in windows)
     log_debug(debug, f"Total screentime: {total_duration} seconds")
     log_debug(debug, f"Available window capacity: {total_capacity} seconds")
@@ -319,170 +317,92 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
             f"({total_duration} seconds required, {total_capacity} seconds available)."
         )
 
-    capacities = [window.capacity_seconds for window in windows]
-    suffix_capacities = [0] * (len(capacities) + 1)
-    for index in range(len(capacities) - 1, -1, -1):
-        suffix_capacities[index] = suffix_capacities[index + 1] + capacities[index]
-
-    infinite_cost = (10**9, 10**18)
-
-    def add_cost(cost: tuple[int, int], splits: int = 0, waste: int = 0) -> tuple[int, int]:
-        return cost[0] + splits, cost[1] + waste
-
-    @lru_cache(maxsize=None)
-    def solve(block_index: int, window_index: int, window_remaining: int, block_remaining: int) -> tuple[int, int]:
-        if block_index >= len(durations):
-            waste = window_remaining + suffix_capacities[window_index + 1]
-            return 0, waste
-
-        if window_index >= len(windows):
-            return infinite_cost
-
-        current_need = durations[block_index] if block_remaining < 0 else block_remaining
-
-        if current_need <= 0:
-            return solve(block_index + 1, window_index, window_remaining, -1)
-
-        if window_remaining <= 0:
-            if window_index + 1 >= len(windows):
-                return infinite_cost
-            return solve(block_index, window_index + 1, capacities[window_index + 1], current_need)
-
-        if current_need <= window_remaining:
-            return solve(block_index + 1, window_index, window_remaining - current_need, -1)
-
-        if block_remaining < 0:
-            candidates: list[tuple[int, int]] = []
-
-            if window_index + 1 < len(windows):
-                skip_cost = solve(block_index, window_index + 1, capacities[window_index + 1], current_need)
-                candidates.append(add_cost(skip_cost, waste=window_remaining))
-
-                split_cost = solve(
-                    block_index,
-                    window_index + 1,
-                    capacities[window_index + 1],
-                    current_need - window_remaining,
-                )
-                candidates.append(add_cost(split_cost, splits=1))
-
-            if not candidates:
-                return infinite_cost
-
-            return min(candidates)
-
-        if window_index + 1 >= len(windows):
-            return infinite_cost
-
-        return solve(
-            block_index,
-            window_index + 1,
-            capacities[window_index + 1],
-            current_need - window_remaining,
-        )
-
-    def transition_candidates(
-        block_index: int,
-        window_index: int,
-        window_remaining: int,
-        block_remaining: int,
-    ) -> list[tuple[str, tuple[int, int, int, int], int, int, int]]:
-        if block_index >= len(durations):
-            return []
-
-        current_need = durations[block_index] if block_remaining < 0 else block_remaining
-
-        if current_need <= 0:
-            return [("advance_block", (block_index + 1, window_index, window_remaining, -1), 0, 0, 0)]
-
-        if window_remaining <= 0:
-            if window_index + 1 >= len(windows):
-                return []
-            return [("advance_window", (block_index, window_index + 1, capacities[window_index + 1], current_need), 0, 0, 0)]
-
-        if current_need <= window_remaining:
-            return [("place_full", (block_index + 1, window_index, window_remaining - current_need, -1), 0, 0, current_need)]
-
-        if block_remaining < 0:
-            candidates = []
-            if window_index + 1 < len(windows):
-                candidates.append(
-                    (
-                        "skip",
-                        (block_index, window_index + 1, capacities[window_index + 1], current_need),
-                        0,
-                        window_remaining,
-                        0,
-                    )
-                )
-                candidates.append(
-                    (
-                        "split",
-                        (block_index, window_index + 1, capacities[window_index + 1], current_need - window_remaining),
-                        1,
-                        0,
-                        window_remaining,
-                    )
-                )
-            return candidates
-
-        if window_index + 1 >= len(windows):
-            return []
-
-        return [
-            (
-                "continue_split",
-                (block_index, window_index + 1, capacities[window_index + 1], current_need - window_remaining),
-                0,
-                0,
-                window_remaining,
-            )
-        ]
-
-    def rank_transition(
-        transition: tuple[str, tuple[int, int, int, int], int, int, int]
-    ) -> tuple[int, int, int]:
-        action, next_state, extra_splits, extra_waste, _ = transition
-        next_cost = solve(*next_state)
-        return next_cost[0] + extra_splits, next_cost[1] + extra_waste, {
-            "place_full": 0,
-            "advance_block": 1,
-            "advance_window": 2,
-            "skip": 3,
-            "continue_split": 4,
-            "split": 5,
-        }[action]
-
     segments: list[PlannedSegment] = []
-    state = (0, 0, capacities[0], -1)
+    remaining_entries: list[dict[str, Any]] = [
+        {"app_name": entry.app_name, "remaining_seconds": entry.duration_seconds}
+        for entry in entries
+    ]
+    future_capacity_ceiling = [0] * (len(windows) + 1)
+    for index in range(len(windows) - 1, -1, -1):
+        future_capacity_ceiling[index] = max(windows[index].capacity_seconds, future_capacity_ceiling[index + 1])
 
-    while state[0] < len(durations):
-        candidates = transition_candidates(*state)
-        if not candidates:
-            raise ValueError("Could not plan the configured screentime into the available time windows.")
+    for window_index, window in enumerate(windows):
+        window_remaining = window.capacity_seconds
+        cursor = window.start
 
-        action, next_state, extra_splits, extra_waste, segment_seconds = min(candidates, key=rank_transition)
-        block_index, window_index, window_remaining, block_remaining = state
-        current_need = durations[block_index] if block_remaining < 0 else block_remaining
-        window = windows[window_index]
-        used_seconds = window.capacity_seconds - window_remaining
-        segment_start = window.start + timedelta(seconds=used_seconds)
+        while window_remaining > 0 and remaining_entries:
+            current_entry = remaining_entries[0]
+            current_remaining = int(current_entry["remaining_seconds"])
 
-        if action in {"place_full", "split", "continue_split"}:
+            if current_remaining <= window_remaining:
+                segments.append(
+                    PlannedSegment(
+                        app_name=str(current_entry["app_name"]),
+                        start=cursor,
+                        duration_seconds=current_remaining,
+                    )
+                )
+                cursor += timedelta(seconds=current_remaining)
+                window_remaining -= current_remaining
+                remaining_entries.pop(0)
+                log_debug(
+                    debug,
+                    f"Placed current block intact in {window.label}: {current_entry['app_name']} ({current_remaining}s)",
+                )
+                continue
+
+            fitting_candidates = [
+                (index, int(entry["remaining_seconds"]))
+                for index, entry in enumerate(remaining_entries[1:], start=1)
+                if int(entry["remaining_seconds"]) <= window_remaining
+            ]
+
+            if fitting_candidates:
+                candidate_index, candidate_seconds = min(
+                    fitting_candidates,
+                    key=lambda item: (item[1], item[0]),
+                )
+                candidate_entry = remaining_entries.pop(candidate_index)
+                segments.append(
+                    PlannedSegment(
+                        app_name=str(candidate_entry["app_name"]),
+                        start=cursor,
+                        duration_seconds=candidate_seconds,
+                    )
+                )
+                cursor += timedelta(seconds=candidate_seconds)
+                window_remaining -= candidate_seconds
+                log_debug(
+                    debug,
+                    f"Filled gap in {window.label} with later block: {candidate_entry['app_name']} ({candidate_seconds}s)",
+                )
+                continue
+
+            if current_remaining <= future_capacity_ceiling[window_index + 1]:
+                log_debug(
+                    debug,
+                    f"Left gap open in {window.label} so block can stay intact later: "
+                    f"{current_entry['app_name']} ({current_remaining}s)",
+                )
+                break
+
+            split_seconds = min(current_remaining, window_remaining)
             segments.append(
                 PlannedSegment(
-                    app_name=entries[block_index].app_name,
-                    start=segment_start,
-                    duration_seconds=segment_seconds,
+                    app_name=str(current_entry["app_name"]),
+                    start=cursor,
+                    duration_seconds=split_seconds,
                 )
             )
-
-        log_debug(
-            debug,
-            f"Planner action={action} block={block_index + 1}/{len(durations)} "
-            f"window={window.label} remaining={window_remaining} need={current_need}",
-        )
-        state = next_state
+            cursor += timedelta(seconds=split_seconds)
+            window_remaining -= split_seconds
+            current_entry["remaining_seconds"] = current_remaining - split_seconds
+            log_debug(
+                debug,
+                f"Split block in {window.label}: {current_entry['app_name']} ({split_seconds}s of {current_remaining}s)",
+            )
+            if int(current_entry["remaining_seconds"]) <= 0:
+                remaining_entries.pop(0)
 
     return segments
 

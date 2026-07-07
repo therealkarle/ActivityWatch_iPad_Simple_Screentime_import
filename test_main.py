@@ -52,6 +52,24 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual([segment.duration_seconds for segment in segments], [10 * 60, 2 * 60])
         self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=20)])
 
+    def test_plan_entries_fills_gap_with_later_block_without_forcing_split(self) -> None:
+        day = datetime(2026, 7, 7, tzinfo=timezone.utc)
+        windows = [
+            main.TimeWindow("w1", day, day + timedelta(minutes=10)),
+            main.TimeWindow("w2", day + timedelta(minutes=30), day + timedelta(minutes=60)),
+        ]
+        entries = [
+            main.ParsedEntry("AppA", 15 * 60),
+            main.ParsedEntry("AppB", 5 * 60),
+            main.ParsedEntry("AppC", 10 * 60),
+        ]
+
+        segments = main.plan_entries_into_windows(entries, windows)
+
+        self.assertEqual([segment.app_name for segment in segments], ["AppB", "AppA", "AppC"])
+        self.assertEqual([segment.duration_seconds for segment in segments], [5 * 60, 15 * 60, 10 * 60])
+        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=30), day + timedelta(minutes=45)])
+
     def test_create_events_are_sorted_and_non_overlapping(self) -> None:
         entries = [
             main.ParsedEntry("AppA", 5 * 60),
