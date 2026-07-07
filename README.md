@@ -44,6 +44,7 @@ python -m pip install aw-client aw-core
    - `log_file_path` to the full path of your iCloud Drive Screen Time log
    - `activitywatch_base_url` to your local ActivityWatch server URL
    - `activitywatch_hostname` to the client name you want to use for bucket IDs
+   - `activitywatch_bucket_hostname` to the host name that should own the imported buckets in ActivityWatch
    - `sync_status_file` to the state file path, if you want a different location
    - `debug` to `true` if you want detailed diagnostic output, or `false` for normal runs
 3. Keep `config.json` out of version control. It is already ignored by `.gitignore`.

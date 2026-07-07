@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     "log_file_path": r"C:\Users\flori\iCloudDrive\IPadUsageLogs\Florian_IPad_Daily-Usage-Time.txt",
     "activitywatch_base_url": "http://127.0.0.1:5600",
     "activitywatch_hostname": "Florian_IPad_SimpleScreentime",
+    "activitywatch_bucket_hostname": None,
     "sync_status_file": "sync_status.json",
     "debug": False,
 }
@@ -259,6 +260,15 @@ def build_activitywatch_client(
     return ActivityWatchClient(client_name)
 
 
+def apply_bucket_hostname_override(client: Any, bucket_hostname: str | None, debug: bool = False) -> None:
+    if not bucket_hostname:
+        return
+
+    if hasattr(client, "client_hostname"):
+        client.client_hostname = bucket_hostname
+        log_debug(debug, f"ActivityWatch bucket hostname override: {bucket_hostname}")
+
+
 def ensure_bucket(client: Any, bucket_id: str, bucket_type: str, debug: bool = False) -> None:
     method = getattr(client, "create_bucket", None) or getattr(client, "create", None)
     if method is None:
@@ -442,10 +452,20 @@ def main() -> int:
             default="Florian_IPad_SimpleScreentime",
         )
     )
+    aw_bucket_hostname = get_config_value(
+        config,
+        "activitywatch_bucket_hostname",
+        "aw_bucket_hostname",
+        default=None,
+    )
+    if aw_bucket_hostname is not None:
+        aw_bucket_hostname = str(aw_bucket_hostname)
     log_debug(debug, f"Resolved log path: {log_file_path}")
     log_debug(debug, f"Resolved sync status path: {sync_status_path}")
     log_debug(debug, f"ActivityWatch base URL: {aw_base_url}")
     log_debug(debug, f"ActivityWatch client hostname: {aw_client_hostname}")
+    if aw_bucket_hostname is not None:
+        log_debug(debug, f"ActivityWatch bucket hostname: {aw_bucket_hostname}")
 
     try:
         grouped_entries = parse_log_file(log_file_path, debug=debug)
@@ -468,6 +488,8 @@ def main() -> int:
     except Exception as exc:
         print(f"Failed to initialize ActivityWatch client: {exc}", file=sys.stderr)
         return 1
+
+    apply_bucket_hostname_override(client, aw_bucket_hostname, debug=debug)
 
     try:
         processed_dates, _ = sync_days(

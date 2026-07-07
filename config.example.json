@@ -2,6 +2,7 @@
   "log_file_path": "C:\\Users\\YourName\\iCloudDrive\\IPadUsageLogs\\Your_Daily-Usage-Time.txt",
   "activitywatch_base_url": "http://localhost:5600",
   "activitywatch_hostname": "Your_Device_Name",
+  "activitywatch_bucket_hostname": "Your_Bucket_Host_Name",
   "sync_status_file": "sync_status.json",
   "debug": false
 }
