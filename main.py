@@ -8,6 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, DefaultDict, Iterable
 
 try:
@@ -23,9 +24,8 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "config.json"
 DEFAULT_CONFIG = {
     "log_file_path": r"C:\Users\flori\iCloudDrive\IPadUsageLogs\Florian_IPad_Daily-Usage-Time.txt",
-    "aw_hostname": "127.0.0.1",
-    "aw_port": 5600,
-    "aw_client_hostname": "Florian_IPad_SimpleScreentime",
+    "activitywatch_base_url": "http://127.0.0.1:5600",
+    "activitywatch_hostname": "Florian_IPad_SimpleScreentime",
     "sync_status_file": "sync_status.json",
     "debug": False,
 }
@@ -84,6 +84,13 @@ def load_config() -> dict[str, Any]:
 
     config.update(loaded)
     return config
+
+
+def get_config_value(config: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in config:
+            return config[key]
+    return default
 
 
 def get_debug_flag(config: dict[str, Any]) -> bool:
@@ -210,20 +217,32 @@ def save_last_synced_date(sync_status_path: Path, date_text: str, debug: bool = 
 
 def build_activitywatch_client(
     client_name: str,
-    hostname: str,
-    port: int,
+    base_url: str,
     debug: bool = False,
 ) -> ActivityWatchClient:
-    attempts: list[dict[str, Any]] = [
-        {"host": hostname, "port": port},
-        {"hostname": hostname, "port": port},
-        {"server": hostname, "port": port},
-        {"base_url": f"http://{hostname}:{port}"},
-        {"url": f"http://{hostname}:{port}"},
-        {"host": hostname},
-        {"hostname": hostname},
-        {},
-    ]
+    attempts: list[dict[str, Any]] = [{"base_url": base_url}, {"url": base_url}]
+
+    parsed_url = urlparse(base_url)
+    hostname = parsed_url.hostname
+    port = parsed_url.port
+    if hostname:
+        if port is not None:
+            attempts.extend(
+                [
+                    {"host": hostname, "port": port},
+                    {"hostname": hostname, "port": port},
+                    {"server": hostname, "port": port},
+                ]
+            )
+        attempts.extend(
+            [
+                {"host": hostname},
+                {"hostname": hostname},
+                {"server": hostname},
+            ]
+        )
+
+    attempts.append({})
 
     last_error: Exception | None = None
     for extra_kwargs in attempts:
@@ -407,19 +426,25 @@ def main() -> int:
 
     log_file_path = resolve_path(config["log_file_path"], BASE_DIR)
     sync_status_path = resolve_path(config["sync_status_file"], BASE_DIR)
-    aw_hostname = str(config["aw_hostname"])
+    aw_base_url = str(
+        get_config_value(
+            config,
+            "activitywatch_base_url",
+            "aw_base_url",
+            default=f"http://{get_config_value(config, 'aw_hostname', default='127.0.0.1')}:{get_config_value(config, 'aw_port', default=5600)}",
+        )
+    )
+    aw_client_hostname = str(
+        get_config_value(
+            config,
+            "activitywatch_hostname",
+            "aw_client_hostname",
+            default="Florian_IPad_SimpleScreentime",
+        )
+    )
     log_debug(debug, f"Resolved log path: {log_file_path}")
     log_debug(debug, f"Resolved sync status path: {sync_status_path}")
-    log_debug(debug, f"ActivityWatch host: {aw_hostname}")
-
-    try:
-        aw_port = int(config["aw_port"])
-    except (TypeError, ValueError):
-        print("Configuration error: aw_port must be an integer.", file=sys.stderr)
-        return 1
-
-    aw_client_hostname = str(config["aw_client_hostname"])
-    log_debug(debug, f"ActivityWatch port: {aw_port}")
+    log_debug(debug, f"ActivityWatch base URL: {aw_base_url}")
     log_debug(debug, f"ActivityWatch client hostname: {aw_client_hostname}")
 
     try:
@@ -439,7 +464,7 @@ def main() -> int:
     last_synced_date = load_last_synced_date(sync_status_path, debug=debug)
 
     try:
-        client = build_activitywatch_client(aw_client_hostname, aw_hostname, aw_port, debug=debug)
+        client = build_activitywatch_client(aw_client_hostname, aw_base_url, debug=debug)
     except Exception as exc:
         print(f"Failed to initialize ActivityWatch client: {exc}", file=sys.stderr)
         return 1
