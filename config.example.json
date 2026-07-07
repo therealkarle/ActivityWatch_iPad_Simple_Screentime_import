@@ -1,0 +1,7 @@
+{
+  "log_file_path": "C:\\Users\\YourName\\iCloudDrive\\IPadUsageLogs\\Your_Daily-Usage-Time.txt",
+  "aw_hostname": "127.0.0.1",
+  "aw_port": 5600,
+  "aw_client_hostname": "Your_Device_Name",
+  "sync_status_file": "sync_status.json"
+}

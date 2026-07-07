@@ -1,0 +1,27 @@
+# Local configuration and sync state
+config.json
+sync_status.json
+
+# Private iPad Screen Time logs
+IPadUsageLogs/
+**/IPadUsageLogs/
+Florian_IPad_Daily-Usage-Time.txt
+*Daily-Usage-Time*.txt
+
+# Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Editor and OS artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
