@@ -23,6 +23,7 @@ except ImportError as exc:  # pragma: no cover - handled at runtime
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "config.json"
+LOCAL_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
 DEFAULT_CONFIG = {
     "log_file_path": r"C:\Users\flori\iCloudDrive\IPadUsageLogs\Florian_IPad_Daily-Usage-Time.txt",
     "activitywatch_base_url": "http://127.0.0.1:5600",
@@ -242,7 +243,7 @@ def build_planning_windows(
     if wake_up_time <= start_time or wake_up_time > 24 * 60:
         raise ValueError("wake_up_time must be later than start_time and within the day.")
 
-    day_start = datetime.strptime(day_text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    day_start = datetime.strptime(day_text, "%Y-%m-%d").replace(tzinfo=LOCAL_TIMEZONE)
     windows: list[TimeWindow] = []
 
     windows.append(
