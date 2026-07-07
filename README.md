@@ -46,8 +46,8 @@ python -m pip install aw-client aw-core
    - `activitywatch_base_url` to your local ActivityWatch server URL
    - `activitywatch_hostname` to the client name you want to use for bucket IDs
    - `activitywatch_bucket_hostname` to the host name that should own the imported buckets in ActivityWatch
-   - `start_time` to the first clock time the synthetic day may start, using `HHMM` notation such as `0` or `600`
-   - `wake_up_time` to the point where the importer should start preferring backup windows, also in `HHMM`
+   - `start_time` to the first local clock time the synthetic day may start, using `HHMM` notation such as `0` or `600`
+   - `wake_up_time` to the local time where the importer should start preferring backup windows, also in `HHMM`
    - `backup_intervals` to a semicolon-separated list like `[2200;2400]; [1200;1300]`
    - `sync_status_file` to the state file path, if you want a different location
    - `debug` to `true` if you want detailed diagnostic output, or `false` for normal runs
@@ -76,10 +76,11 @@ Window planning works like this:
 
 1. The importer first fills the main window from `start_time` to `wake_up_time`
 2. Then it tries the configured `backup_intervals` in the order you listed them
-3. If a block does not fit in the current window, the planner prefers a later window that can hold it completely
-4. Backup windows split the current block instead of pushing it to the next morning block
-5. If there is still screentime left after all configured windows, the importer continues immediately after the last imported event
-6. The importer never moves any app time into the next calendar day; if that would be required, the import fails for that day
+3. Before writing any event, the planner looks at the full day total and places app blocks in original order wherever possible
+4. If a block does not fit in the current window, the planner prefers a later window that can hold it completely so the block stays intact
+5. Backup windows may split a block only when that is mathematically necessary
+6. If there is still screentime left after all configured windows, the planner continues immediately after the last scheduled event on the same day
+7. No single event ever crosses midnight; if the day still does not fit, the importer raises an error instead of moving anything into the next day
 
 To reset the importer state on Windows, run:
 

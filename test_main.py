@@ -28,7 +28,7 @@ class PlannerTests(unittest.TestCase):
             main.ParsedEntry("AppB", 15 * 60),
         ]
 
-        segments = main.plan_entries_into_windows(entries, windows)
+        segments, carryover = main.plan_entries_into_windows(entries, windows)
 
         self.assertEqual(len(segments), 2)
         self.assertEqual(segments[0].app_name, "AppA")
@@ -36,7 +36,8 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(segments[0].start, day)
         self.assertEqual(segments[1].app_name, "AppB")
         self.assertEqual(segments[1].duration_seconds, 15 * 60)
-        self.assertEqual(segments[1].start, day + timedelta(minutes=20))
+        self.assertEqual(segments[1].start, day + timedelta(minutes=5))
+        self.assertEqual(carryover, [])
 
     def test_plan_entries_splits_only_when_needed(self) -> None:
         day = datetime(2026, 7, 7, tzinfo=timezone.utc)
@@ -46,11 +47,12 @@ class PlannerTests(unittest.TestCase):
         ]
         entries = [main.ParsedEntry("AppA", 12 * 60)]
 
-        segments = main.plan_entries_into_windows(entries, windows)
+        segments, carryover = main.plan_entries_into_windows(entries, windows)
 
         self.assertEqual(len(segments), 2)
         self.assertEqual([segment.duration_seconds for segment in segments], [10 * 60, 2 * 60])
-        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=20)])
+        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=10)])
+        self.assertEqual(carryover, [])
 
     def test_plan_entries_fills_gap_with_later_block_without_forcing_split(self) -> None:
         day = datetime(2026, 7, 7, tzinfo=timezone.utc)
@@ -64,11 +66,12 @@ class PlannerTests(unittest.TestCase):
             main.ParsedEntry("AppC", 10 * 60),
         ]
 
-        segments = main.plan_entries_into_windows(entries, windows)
+        segments, carryover = main.plan_entries_into_windows(entries, windows)
 
         self.assertEqual([segment.app_name for segment in segments], ["AppB", "AppA", "AppC"])
         self.assertEqual([segment.duration_seconds for segment in segments], [5 * 60, 15 * 60, 10 * 60])
-        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=30), day + timedelta(minutes=45)])
+        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=5), day + timedelta(minutes=20)])
+        self.assertEqual(carryover, [])
 
     def test_create_events_are_sorted_and_non_overlapping(self) -> None:
         entries = [
@@ -77,7 +80,7 @@ class PlannerTests(unittest.TestCase):
             main.ParsedEntry("AppC", 5 * 60),
         ]
 
-        app_events, afk_events = main.create_events_for_day(
+        app_events, afk_events, carryover = main.create_events_for_day(
             "2026-07-07",
             entries,
             start_time=0,
@@ -87,6 +90,7 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(len(app_events), len(afk_events))
         self.assertEqual([event.timestamp for event in app_events], sorted(event.timestamp for event in app_events))
+        self.assertEqual(carryover, [])
 
         previous_end = None
         for event in app_events:
@@ -94,14 +98,14 @@ class PlannerTests(unittest.TestCase):
                 self.assertGreaterEqual(event.timestamp, previous_end)
             previous_end = event.timestamp + event.duration
 
-    def test_backup_window_splits_head_block_and_spillover_continues_from_last_event_end(self) -> None:
-        day = datetime(2026, 7, 7, tzinfo=main.LOCAL_TIMEZONE)
+    def test_continues_after_last_event_in_same_day(self) -> None:
+        day1 = datetime(2026, 7, 7, tzinfo=main.LOCAL_TIMEZONE)
         entries = [
             main.ParsedEntry("AppA", 8 * 60),
             main.ParsedEntry("AppB", 3 * 60),
         ]
 
-        app_events, _ = main.create_events_for_day(
+        app_events_day1, _, carryover = main.create_events_for_day(
             "2026-07-07",
             entries,
             start_time=0,
@@ -110,28 +114,25 @@ class PlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [(event.data["app"], event.timestamp, event.duration) for event in app_events],
+            [(event.data["app"], event.timestamp.astimezone(main.LOCAL_TIMEZONE), event.duration) for event in app_events_day1],
             [
-                ("AppB", day, timedelta(minutes=3)),
-                ("AppA", day + timedelta(minutes=3), timedelta(minutes=2)),
-                ("AppA", day + timedelta(minutes=20), timedelta(minutes=5)),
-                ("AppA", day + timedelta(minutes=25), timedelta(minutes=1)),
+                ("AppB", day1, timedelta(minutes=3)),
+                ("AppA", day1 + timedelta(minutes=3), timedelta(minutes=2)),
+                ("AppA", day1 + timedelta(minutes=5), timedelta(minutes=6)),
             ],
         )
+        self.assertEqual(carryover, [])
 
-    def test_create_events_rejects_cross_day_spillover(self) -> None:
-        entries = [
-            main.ParsedEntry("AppA", 8 * 60),
-            main.ParsedEntry("AppB", 15 * 60),
-        ]
+    def test_carryover_only_contains_time_beyond_midnight(self) -> None:
+        entries = [main.ParsedEntry("AppA", 25 * 60 * 60)]
 
-        with self.assertRaisesRegex(ValueError, "cannot fit all app time before midnight"):
+        with self.assertRaisesRegex(ValueError, "cannot fit all app time without crossing midnight"):
             main.create_events_for_day(
                 "2026-07-07",
                 entries,
                 start_time=0,
                 wake_up_time=5,
-                backup_intervals=[(23 * 60 + 50, 23 * 60 + 55)],
+                backup_intervals=[(20, 25)],
             )
 
 

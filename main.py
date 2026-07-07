@@ -270,9 +270,11 @@ def build_planning_windows(
     return [window for window in windows if window.capacity_seconds > 0]
 
 
-def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWindow], debug: bool = False) -> list[PlannedSegment]:
+def plan_entries_into_windows(
+    entries: list[ParsedEntry], windows: list[TimeWindow], debug: bool = False
+) -> tuple[list[PlannedSegment], list[ParsedEntry]]:
     if not entries or not windows:
-        return []
+        return [], entries[:]
 
     total_duration = sum(entry.duration_seconds for entry in entries)
     log_debug(debug, f"Total screentime: {total_duration} seconds")
@@ -282,11 +284,19 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
         {"app_name": entry.app_name, "remaining_seconds": entry.duration_seconds}
         for entry in entries
     ]
-    last_event_end: datetime | None = None
     day_start = windows[0].start.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
+    primary_segment_end = windows[0].start
+    primary_had_events = False
 
     for window_index, window in enumerate(windows):
+        if window_index > 0 and remaining_entries:
+            log_debug(
+                debug,
+                f"Skipping later window {window.label} because remaining app time continues after the morning block.",
+            )
+            break
+
         window_remaining = window.capacity_seconds
         cursor = window.start
 
@@ -306,6 +316,9 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
                 )
                 cursor += timedelta(seconds=current_remaining)
                 window_remaining -= current_remaining
+                if window_index == 0:
+                    primary_had_events = True
+                    primary_segment_end = max(primary_segment_end, cursor)
                 remaining_entries.pop(0)
                 log_debug(
                     debug,
@@ -335,7 +348,9 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
                     )
                     cursor += timedelta(seconds=candidate_seconds)
                     window_remaining -= candidate_seconds
-                    last_event_end = cursor
+                    if window_index == 0:
+                        primary_had_events = True
+                        primary_segment_end = max(primary_segment_end, cursor)
                     log_debug(
                         debug,
                         f"Filled gap in {window.label} with later block: {candidate_entry['app_name']} ({candidate_seconds}s)",
@@ -359,6 +374,12 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
                     f"Backup window will split current block instead of deferring it: "
                     f"{current_entry['app_name']} ({current_remaining}s)",
                 )
+            else:
+                log_debug(
+                    debug,
+                    f"Unclassified window will split current block: "
+                    f"{current_entry['app_name']} ({current_remaining}s)",
+                )
 
             split_seconds = min(current_remaining, window_remaining)
             segments.append(
@@ -370,8 +391,10 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
             )
             cursor += timedelta(seconds=split_seconds)
             window_remaining -= split_seconds
-            last_event_end = cursor
             current_entry["remaining_seconds"] = current_remaining - split_seconds
+            if window_index == 0:
+                primary_had_events = True
+                primary_segment_end = max(primary_segment_end, cursor)
             log_debug(
                 debug,
                 f"Split block in {window.label}: {current_entry['app_name']} ({split_seconds}s of {current_remaining}s)",
@@ -379,15 +402,13 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
             if int(current_entry["remaining_seconds"]) <= 0:
                 remaining_entries.pop(0)
 
-    spill_cursor = last_event_end or windows[0].start
-    while remaining_entries:
-        current_entry = remaining_entries.pop(0)
+    spill_cursor = primary_segment_end if primary_had_events else windows[0].end
+    while remaining_entries and spill_cursor < day_end:
+        current_entry = remaining_entries[0]
         current_remaining = int(current_entry["remaining_seconds"])
         available_seconds = int((day_end - spill_cursor).total_seconds())
         if available_seconds <= 0:
-            raise ValueError(
-                "The configured day cannot be extended beyond midnight without moving app time to the next day."
-            )
+            break
 
         placed_seconds = min(current_remaining, available_seconds)
         segments.append(
@@ -398,17 +419,28 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
             )
         )
         spill_cursor += timedelta(seconds=placed_seconds)
-        last_event_end = spill_cursor
+        current_entry["remaining_seconds"] = current_remaining - placed_seconds
         log_debug(
             debug,
-            f"Spillover continuation from last event end: {current_entry['app_name']} ({placed_seconds}s of {current_remaining}s)",
+            f"Continued after configured windows: {current_entry['app_name']} ({placed_seconds}s of {current_remaining}s)",
         )
-        if placed_seconds < current_remaining:
-            raise ValueError(
-                "The configured day cannot fit all app time before midnight without moving app time to the next day."
-            )
+        if int(current_entry["remaining_seconds"]) <= 0:
+            remaining_entries.pop(0)
 
-    return segments
+    carryover_entries = [
+        ParsedEntry(app_name=str(entry["app_name"]), duration_seconds=int(entry["remaining_seconds"]))
+        for entry in remaining_entries
+        if int(entry["remaining_seconds"]) > 0
+    ]
+
+    if carryover_entries:
+        log_debug(
+            debug,
+            "Remaining app time cannot fit before midnight: "
+            + ", ".join(f"{entry.app_name} ({entry.duration_seconds}s)" for entry in carryover_entries),
+        )
+
+    return segments, carryover_entries
 
 
 def parse_duration_to_seconds(duration_text: str) -> int | None:
@@ -489,7 +521,31 @@ def parse_log_file(log_path: Path, debug: bool = False) -> dict[str, list[Parsed
     return dict(grouped_entries)
 
 
-def load_last_synced_date(sync_status_path: Path, debug: bool = False) -> str | None:
+def _parse_pending_overflow(payload: Any, debug: bool = False) -> list[ParsedEntry]:
+    if not isinstance(payload, list):
+        return []
+
+    pending_entries: list[ParsedEntry] = []
+    for index, item in enumerate(payload, start=1):
+        if not isinstance(item, dict):
+            log_debug(debug, f"Skipping invalid pending overflow entry #{index}: not an object")
+            continue
+
+        app_name = item.get("app_name")
+        duration_value = item.get("remaining_seconds")
+        if not isinstance(app_name, str) or not app_name.strip():
+            log_debug(debug, f"Skipping invalid pending overflow entry #{index}: missing app_name")
+            continue
+        if not isinstance(duration_value, int) or duration_value <= 0:
+            log_debug(debug, f"Skipping invalid pending overflow entry #{index}: invalid remaining_seconds")
+            continue
+
+        pending_entries.append(ParsedEntry(app_name=app_name.strip(), duration_seconds=duration_value))
+
+    return pending_entries
+
+
+def load_sync_state(sync_status_path: Path, debug: bool = False) -> str | None:
     if not sync_status_path.exists():
         log_debug(debug, f"Sync status file not found: {sync_status_path}")
         return None
@@ -519,9 +575,17 @@ def load_last_synced_date(sync_status_path: Path, debug: bool = False) -> str | 
     return value
 
 
-def save_last_synced_date(sync_status_path: Path, date_text: str, debug: bool = False) -> None:
-    save_json_file(sync_status_path, {"last_synced_date": date_text})
-    log_debug(debug, f"Updated sync status file: {sync_status_path} -> {date_text}")
+def save_sync_state(
+    sync_status_path: Path,
+    date_text: str | None,
+    debug: bool = False,
+) -> None:
+    payload: dict[str, Any] = {}
+    if date_text is not None:
+        payload["last_synced_date"] = date_text
+
+    save_json_file(sync_status_path, payload)
+    log_debug(debug, f"Updated sync state file: {sync_status_path} -> {date_text or 'n/a'}")
 
 
 def build_activitywatch_client(
@@ -670,13 +734,13 @@ def create_events_for_day(
     wake_up_time: int,
     backup_intervals: list[tuple[int, int]],
     debug: bool = False,
-) -> tuple[list[Event], list[Event]]:
+) -> tuple[list[Event], list[Event], list[ParsedEntry]]:
     entry_list = list(entries)
     if not entry_list:
-        return [], []
+        return [], [], []
 
     planning_windows = build_planning_windows(day_text, start_time, wake_up_time, backup_intervals)
-    planned_segments = plan_entries_into_windows(entry_list, planning_windows, debug=debug)
+    planned_segments, carryover_entries = plan_entries_into_windows(entry_list, planning_windows, debug=debug)
 
     app_events: list[Event] = []
     afk_events: list[Event] = []
@@ -704,7 +768,9 @@ def create_events_for_day(
 
     app_events.sort(key=lambda event: event.timestamp)
     afk_events.sort(key=lambda event: event.timestamp)
-    return app_events, afk_events
+    if carryover_entries:
+        raise ValueError("The configured day cannot fit all app time without crossing midnight.")
+    return app_events, afk_events, carryover_entries
 
 
 def sync_days(
@@ -733,7 +799,7 @@ def sync_days(
             log_debug(debug, f"Skipping already-synced day: {date_text}")
             continue
 
-        app_events, afk_events = create_events_for_day(
+        app_events, afk_events, _carryover_entries = create_events_for_day(
             date_text,
             grouped_entries[date_text],
             start_time=start_time,
@@ -741,7 +807,7 @@ def sync_days(
             backup_intervals=backup_intervals,
             debug=debug,
         )
-        if not app_events:
+        if not app_events and not grouped_entries[date_text]:
             log_debug(debug, f"Skipping day with no app events: {date_text}")
             continue
 
@@ -750,9 +816,10 @@ def sync_days(
         insert_events(client, afk_bucket_id, afk_events, debug=debug)
 
         last_synced_value = date_text
-        save_last_synced_date(sync_status_path, last_synced_value, debug=debug)
+        save_sync_state(sync_status_path, last_synced_value, debug=debug)
         processed_dates += 1
 
+    save_sync_state(sync_status_path, last_synced_value, debug=debug)
     return processed_dates, last_synced_value
 
 
@@ -821,7 +888,7 @@ def main() -> int:
         return 0
 
     log_debug(debug, f"Parsed {len(grouped_entries)} day block(s) from log")
-    last_synced_date = load_last_synced_date(sync_status_path, debug=debug)
+    last_synced_date = load_sync_state(sync_status_path, debug=debug)
 
     try:
         client = build_activitywatch_client(aw_client_hostname, aw_base_url, debug=debug)
