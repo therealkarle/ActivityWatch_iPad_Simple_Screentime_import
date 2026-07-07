@@ -9,7 +9,7 @@ The importer reads a structured text log, converts each app duration into Activi
 ## Features
 
 - Reads the Screen Time log from a configurable local path
-- Parses daily blocks in the format `YYYY-MM-DD:{ ... }`
+- Parses daily blocks in the format `YYYY-MM-DD:{ ... },` with an optional trailing comma after each block
 - Converts mixed durations such as `3h 24min`, `17min`, and `10s` into seconds
 - Skips malformed rows without stopping the import
 - Stores the last successful sync date in `sync_status.json`

@@ -30,7 +30,8 @@ DEFAULT_CONFIG = {
 }
 
 BLOCK_PATTERN = re.compile(
-    r"(?ms)^\s*(\d{4}-\d{2}-\d{2})\s*:\s*\{\s*(.*?)\s*\}\s*$"
+    # Match repeated blocks like `2026-07-06:{ ... },` anywhere in the file.
+    r"(?ms)(\d{4}-\d{2}-\d{2})\s*:\s*\{\s*(.*?)\s*\}\s*,?"
 )
 ENTRY_PATTERN = re.compile(r"^\s*(?P<app>.+)\s*\((?P<duration>[^()]*)\)\s*$")
 DURATION_PATTERN = re.compile(
@@ -105,7 +106,7 @@ def parse_block_entries(block_body: str) -> list[ParsedEntry]:
     entries: list[ParsedEntry] = []
 
     for raw_line in block_body.splitlines():
-        line = raw_line.strip().rstrip("}")
+        line = raw_line.strip().rstrip("},")
         if not line:
             continue
 
