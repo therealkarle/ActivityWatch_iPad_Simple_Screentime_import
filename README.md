@@ -19,6 +19,7 @@ The importer reads a structured text log, converts each app duration into Activi
 ## Repository Structure
 
 - `main.py` - Main importer script
+- `reset.bat` - Windows helper that deletes the imported ActivityWatch buckets and sync state
 - `config.json` - Local configuration file for private use
 - `config.example.json` - Public template configuration
 - `.gitignore` - Ignore rules for local secrets, sync state, and private logs
@@ -66,3 +67,9 @@ On each run, the script:
 5. Writes the newest successfully processed date to `sync_status.json`
 
 If the log file contains malformed lines, the importer skips them and continues processing the rest of the file.
+
+To reset the importer state on Windows, run:
+
+```powershell
+reset.bat
+```
