@@ -270,6 +270,26 @@ def build_planning_windows(
     return [window for window in windows if window.capacity_seconds > 0]
 
 
+def merge_adjacent_segments(segments: list[PlannedSegment]) -> list[PlannedSegment]:
+    if not segments:
+        return []
+
+    merged_segments: list[PlannedSegment] = [segments[0]]
+    for segment in sorted(segments[1:], key=lambda item: item.start):
+        last_segment = merged_segments[-1]
+        last_end = last_segment.start + timedelta(seconds=last_segment.duration_seconds)
+        if last_segment.app_name == segment.app_name and last_end == segment.start:
+            merged_segments[-1] = PlannedSegment(
+                app_name=last_segment.app_name,
+                start=last_segment.start,
+                duration_seconds=last_segment.duration_seconds + segment.duration_seconds,
+            )
+        else:
+            merged_segments.append(segment)
+
+    return merged_segments
+
+
 def plan_entries_into_windows(
     entries: list[ParsedEntry], windows: list[TimeWindow], debug: bool = False
 ) -> tuple[list[PlannedSegment], list[ParsedEntry]]:
@@ -286,27 +306,26 @@ def plan_entries_into_windows(
     ]
     day_start = windows[0].start.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
-    primary_segment_end = windows[0].start
-    primary_had_events = False
+
+    def window_reserve_seconds(window: TimeWindow) -> int:
+        return 10 * 60 if window.label.startswith("backup:") else 0
+
+    def future_windows_can_hold(window_index: int, seconds: int) -> bool:
+        return any(future_window.capacity_seconds >= seconds for future_window in windows[window_index + 1 :])
 
     for window_index, window in enumerate(windows):
-        if window_index > 0 and remaining_entries:
-            log_debug(
-                debug,
-                f"Skipping later window {window.label} because remaining app time continues after the morning block.",
-            )
-            break
-
         window_remaining = window.capacity_seconds
         cursor = window.start
+        reserve_seconds = window_reserve_seconds(window)
 
         while window_remaining > 0 and remaining_entries:
             current_entry = remaining_entries[0]
             current_remaining = int(current_entry["remaining_seconds"])
             window_is_primary = window.label.startswith("primary:")
             window_is_backup = window.label.startswith("backup:")
+            usable_remaining = max(0, window_remaining - reserve_seconds)
 
-            if current_remaining <= window_remaining:
+            if current_remaining <= usable_remaining or (usable_remaining == 0 and current_remaining <= window_remaining):
                 segments.append(
                     PlannedSegment(
                         app_name=str(current_entry["app_name"]),
@@ -316,9 +335,6 @@ def plan_entries_into_windows(
                 )
                 cursor += timedelta(seconds=current_remaining)
                 window_remaining -= current_remaining
-                if window_index == 0:
-                    primary_had_events = True
-                    primary_segment_end = max(primary_segment_end, cursor)
                 remaining_entries.pop(0)
                 log_debug(
                     debug,
@@ -326,55 +342,50 @@ def plan_entries_into_windows(
                 )
                 continue
 
-            if window_is_primary:
-                fitting_candidates = [
-                    (index, int(entry["remaining_seconds"]))
-                    for index, entry in enumerate(remaining_entries[1:], start=1)
-                    if int(entry["remaining_seconds"]) <= window_remaining
-                ]
+            fitting_limit = usable_remaining if usable_remaining > 0 else window_remaining
+            fitting_candidates = [
+                (index, int(entry["remaining_seconds"]))
+                for index, entry in enumerate(remaining_entries[1:], start=1)
+                if int(entry["remaining_seconds"]) <= fitting_limit
+            ]
 
-                if fitting_candidates:
-                    candidate_index, candidate_seconds = min(
-                        fitting_candidates,
-                        key=lambda item: (item[1], item[0]),
-                    )
-                    candidate_entry = remaining_entries.pop(candidate_index)
-                    segments.append(
-                        PlannedSegment(
-                            app_name=str(candidate_entry["app_name"]),
-                            start=cursor,
-                            duration_seconds=candidate_seconds,
-                        )
-                    )
-                    cursor += timedelta(seconds=candidate_seconds)
-                    window_remaining -= candidate_seconds
-                    if window_index == 0:
-                        primary_had_events = True
-                        primary_segment_end = max(primary_segment_end, cursor)
-                    log_debug(
-                        debug,
-                        f"Filled gap in {window.label} with later block: {candidate_entry['app_name']} ({candidate_seconds}s)",
-                    )
-                    continue
-
-                future_can_hold_current = any(
-                    future_window.capacity_seconds >= current_remaining
-                    for future_window in windows[window_index + 1 :]
+            if fitting_candidates:
+                candidate_index, candidate_seconds = min(
+                    fitting_candidates,
+                    key=lambda item: (item[1], item[0]),
                 )
-                if future_can_hold_current:
-                    log_debug(
-                        debug,
-                        f"Left gap open in {window.label} so block can stay intact later: "
-                        f"{current_entry['app_name']} ({current_remaining}s)",
+                candidate_entry = remaining_entries.pop(candidate_index)
+                segments.append(
+                    PlannedSegment(
+                        app_name=str(candidate_entry["app_name"]),
+                        start=cursor,
+                        duration_seconds=candidate_seconds,
                     )
-                    break
-            elif window_is_backup:
+                )
+                cursor += timedelta(seconds=candidate_seconds)
+                window_remaining -= candidate_seconds
+                log_debug(
+                    debug,
+                    f"Filled gap in {window.label} with later block: {candidate_entry['app_name']} ({candidate_seconds}s)",
+                )
+                continue
+
+            future_can_hold_current = future_windows_can_hold(window_index, current_remaining)
+            if future_can_hold_current and (window_is_primary or window_is_backup):
+                log_debug(
+                    debug,
+                    f"Left gap open in {window.label} so block can stay intact later: "
+                    f"{current_entry['app_name']} ({current_remaining}s)",
+                )
+                break
+
+            if window_is_backup:
                 log_debug(
                     debug,
                     f"Backup window will split current block instead of deferring it: "
                     f"{current_entry['app_name']} ({current_remaining}s)",
                 )
-            else:
+            elif not window_is_primary:
                 log_debug(
                     debug,
                     f"Unclassified window will split current block: "
@@ -382,6 +393,8 @@ def plan_entries_into_windows(
                 )
 
             split_seconds = min(current_remaining, window_remaining)
+            if split_seconds <= 0:
+                break
             segments.append(
                 PlannedSegment(
                     app_name=str(current_entry["app_name"]),
@@ -392,9 +405,6 @@ def plan_entries_into_windows(
             cursor += timedelta(seconds=split_seconds)
             window_remaining -= split_seconds
             current_entry["remaining_seconds"] = current_remaining - split_seconds
-            if window_index == 0:
-                primary_had_events = True
-                primary_segment_end = max(primary_segment_end, cursor)
             log_debug(
                 debug,
                 f"Split block in {window.label}: {current_entry['app_name']} ({split_seconds}s of {current_remaining}s)",
@@ -402,7 +412,7 @@ def plan_entries_into_windows(
             if int(current_entry["remaining_seconds"]) <= 0:
                 remaining_entries.pop(0)
 
-    spill_cursor = primary_segment_end if primary_had_events else windows[0].end
+    spill_cursor = max((segment.start + timedelta(seconds=segment.duration_seconds) for segment in segments), default=windows[0].start)
     while remaining_entries and spill_cursor < day_end:
         current_entry = remaining_entries[0]
         current_remaining = int(current_entry["remaining_seconds"])
@@ -427,6 +437,7 @@ def plan_entries_into_windows(
         if int(current_entry["remaining_seconds"]) <= 0:
             remaining_entries.pop(0)
 
+    segments = merge_adjacent_segments(segments)
     carryover_entries = [
         ParsedEntry(app_name=str(entry["app_name"]), duration_seconds=int(entry["remaining_seconds"]))
         for entry in remaining_entries

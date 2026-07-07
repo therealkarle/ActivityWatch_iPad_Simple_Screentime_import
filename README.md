@@ -13,7 +13,7 @@ The importer reads a structured text log, converts each app duration into Activi
 - Converts mixed durations such as `3h 24min`, `17min`, and `10s` into seconds
 - Skips malformed rows without stopping the import
 - Stores the last successful sync date in `sync_status.json`
-- Plans each day across configurable time windows and minimizes app-block splits
+- Plans each day across configurable time windows, minimizes app-block splits, and keeps any overflow in the same-day schedule instead of exporting a separate overflow block
 - Writes matching `not-afk` events so the ActivityWatch UI keeps the imported data visible
 
 ## Repository Structure
@@ -66,7 +66,7 @@ On each run, the script:
 1. Reads `config.json`
 2. Loads the Screen Time log file
 3. Skips all dates that are less than or equal to the last synced date
-4. Computes the total screentime for each new day, then fills the configured windows in order
+4. Computes the total screentime for each new day, then fills the configured windows in order while minimizing splits
 5. Imports each new day into ActivityWatch
 6. Writes the newest successfully processed date to `sync_status.json`
 
@@ -76,10 +76,10 @@ Window planning works like this:
 
 1. The importer first fills the main window from `start_time` to `wake_up_time`
 2. Then it tries the configured `backup_intervals` in the order you listed them
-3. Before writing any event, the planner looks at the full day total and places app blocks in original order wherever possible
-4. If a block does not fit in the current window, the planner prefers a later window that can hold it completely so the block stays intact
-5. Backup windows may split a block only when that is mathematically necessary
-6. If there is still screentime left after all configured windows, the planner continues immediately after the last scheduled event on the same day
+3. The planner looks at the full day total up front and prefers to keep app blocks intact whenever a later window can hold them completely
+4. Backup windows can keep up to 10 minutes of slack unused when that reduces splits in the final plan
+5. If a block still does not fit, the planner splits it only as far as necessary and continues the remainder on the same day
+6. Any remaining spillover is continued after the last scheduled segment, not as a separate next-day block
 7. No single event ever crosses midnight; if the day still does not fit, the importer raises an error instead of moving anything into the next day
 
 To reset the importer state on Windows, run:

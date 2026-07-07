@@ -36,7 +36,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(segments[0].start, day)
         self.assertEqual(segments[1].app_name, "AppB")
         self.assertEqual(segments[1].duration_seconds, 15 * 60)
-        self.assertEqual(segments[1].start, day + timedelta(minutes=5))
+        self.assertEqual(segments[1].start, day + timedelta(minutes=20))
         self.assertEqual(carryover, [])
 
     def test_plan_entries_splits_only_when_needed(self) -> None:
@@ -51,7 +51,7 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(len(segments), 2)
         self.assertEqual([segment.duration_seconds for segment in segments], [10 * 60, 2 * 60])
-        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=10)])
+        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=20)])
         self.assertEqual(carryover, [])
 
     def test_plan_entries_fills_gap_with_later_block_without_forcing_split(self) -> None:
@@ -70,7 +70,10 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual([segment.app_name for segment in segments], ["AppB", "AppA", "AppC"])
         self.assertEqual([segment.duration_seconds for segment in segments], [5 * 60, 15 * 60, 10 * 60])
-        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=5), day + timedelta(minutes=20)])
+        self.assertEqual(
+            [segment.start for segment in segments],
+            [day, day + timedelta(minutes=30), day + timedelta(minutes=45)],
+        )
         self.assertEqual(carryover, [])
 
     def test_create_events_are_sorted_and_non_overlapping(self) -> None:
@@ -118,7 +121,7 @@ class PlannerTests(unittest.TestCase):
             [
                 ("AppB", day1, timedelta(minutes=3)),
                 ("AppA", day1 + timedelta(minutes=3), timedelta(minutes=2)),
-                ("AppA", day1 + timedelta(minutes=5), timedelta(minutes=6)),
+                ("AppA", day1 + timedelta(minutes=20), timedelta(minutes=6)),
             ],
         )
         self.assertEqual(carryover, [])
