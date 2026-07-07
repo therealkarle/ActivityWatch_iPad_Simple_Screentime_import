@@ -46,6 +46,7 @@ python -m pip install aw-client aw-core
    - `aw_port` to your local ActivityWatch server port
    - `aw_client_hostname` to the client name you want to use for bucket IDs
    - `sync_status_file` to the state file path, if you want a different location
+   - `debug` to `true` if you want detailed diagnostic output, or `false` for normal runs
 3. Keep `config.json` out of version control. It is already ignored by `.gitignore`.
 
 ## Usage

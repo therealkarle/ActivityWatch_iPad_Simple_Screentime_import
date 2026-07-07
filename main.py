@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
     "aw_port": 5600,
     "aw_client_hostname": "Florian_IPad_SimpleScreentime",
     "sync_status_file": "sync_status.json",
+    "debug": False,
 }
 
 BLOCK_PATTERN = re.compile(
@@ -44,6 +45,11 @@ DURATION_PATTERN = re.compile(
 class ParsedEntry:
     app_name: str
     duration_seconds: int
+
+
+def log_debug(enabled: bool, message: str) -> None:
+    if enabled:
+        print(f"[debug] {message}")
 
 
 def resolve_path(raw_value: str | Path, base_dir: Path) -> Path:
@@ -78,6 +84,15 @@ def load_config() -> dict[str, Any]:
 
     config.update(loaded)
     return config
+
+
+def get_debug_flag(config: dict[str, Any]) -> bool:
+    value = config.get("debug", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def parse_duration_to_seconds(duration_text: str) -> int | None:
@@ -128,56 +143,77 @@ def parse_block_entries(block_body: str) -> list[ParsedEntry]:
     return entries
 
 
-def parse_log_file(log_path: Path) -> dict[str, list[ParsedEntry]]:
+def parse_log_file(log_path: Path, debug: bool = False) -> dict[str, list[ParsedEntry]]:
     try:
         content = log_path.read_text(encoding="utf-8-sig", errors="replace")
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"Log file not found: {log_path}") from exc
 
-    grouped_entries: DefaultDict[str, list[ParsedEntry]] = defaultdict(list)
+    log_debug(debug, f"Reading log file: {log_path}")
+    log_debug(debug, f"Log file size: {len(content)} characters")
 
-    for date_text, block_body in BLOCK_PATTERN.findall(content):
+    grouped_entries: DefaultDict[str, list[ParsedEntry]] = defaultdict(list)
+    matches = list(BLOCK_PATTERN.findall(content))
+    log_debug(debug, f"Found {len(matches)} daily block candidate(s)")
+
+    for date_text, block_body in matches:
         try:
             datetime.strptime(date_text, "%Y-%m-%d")
         except ValueError:
+            log_debug(debug, f"Skipping invalid date block: {date_text}")
             continue
 
         entries = parse_block_entries(block_body)
         if entries:
             grouped_entries[date_text].extend(entries)
+            log_debug(debug, f"Parsed {date_text}: {len(entries)} valid entrie(s)")
+        else:
+            log_debug(debug, f"Parsed {date_text}: no valid entries")
 
     return dict(grouped_entries)
 
 
-def load_last_synced_date(sync_status_path: Path) -> str | None:
+def load_last_synced_date(sync_status_path: Path, debug: bool = False) -> str | None:
     if not sync_status_path.exists():
+        log_debug(debug, f"Sync status file not found: {sync_status_path}")
         return None
 
     try:
         payload = load_json_file(sync_status_path)
     except (OSError, json.JSONDecodeError, ValueError):
+        log_debug(debug, f"Could not read sync status file: {sync_status_path}")
         return None
 
     if not isinstance(payload, dict):
+        log_debug(debug, "Sync status file does not contain a JSON object")
         return None
 
     value = payload.get("last_synced_date")
     if not isinstance(value, str):
+        log_debug(debug, "Sync status file is missing last_synced_date")
         return None
 
     try:
         datetime.strptime(value, "%Y-%m-%d")
     except ValueError:
+        log_debug(debug, f"Sync status has invalid date: {value}")
         return None
 
+    log_debug(debug, f"Last synced date: {value}")
     return value
 
 
-def save_last_synced_date(sync_status_path: Path, date_text: str) -> None:
+def save_last_synced_date(sync_status_path: Path, date_text: str, debug: bool = False) -> None:
     save_json_file(sync_status_path, {"last_synced_date": date_text})
+    log_debug(debug, f"Updated sync status file: {sync_status_path} -> {date_text}")
 
 
-def build_activitywatch_client(client_name: str, hostname: str, port: int) -> ActivityWatchClient:
+def build_activitywatch_client(
+    client_name: str,
+    hostname: str,
+    port: int,
+    debug: bool = False,
+) -> ActivityWatchClient:
     attempts: list[dict[str, Any]] = [
         {"host": hostname, "port": port},
         {"hostname": hostname, "port": port},
@@ -192,7 +228,9 @@ def build_activitywatch_client(client_name: str, hostname: str, port: int) -> Ac
     last_error: Exception | None = None
     for extra_kwargs in attempts:
         try:
-            return ActivityWatchClient(client_name, **extra_kwargs)
+            client = ActivityWatchClient(client_name, **extra_kwargs)
+            log_debug(debug, f"Initialized ActivityWatch client with args: {extra_kwargs or '{}'}")
+            return client
         except TypeError as exc:
             last_error = exc
 
@@ -202,11 +240,12 @@ def build_activitywatch_client(client_name: str, hostname: str, port: int) -> Ac
     return ActivityWatchClient(client_name)
 
 
-def ensure_bucket(client: Any, bucket_id: str, bucket_type: str) -> None:
+def ensure_bucket(client: Any, bucket_id: str, bucket_type: str, debug: bool = False) -> None:
     method = getattr(client, "create_bucket", None) or getattr(client, "create", None)
     if method is None:
         raise RuntimeError("The installed ActivityWatch client does not expose a bucket creation method.")
 
+    log_debug(debug, f"Ensuring bucket exists: {bucket_id} ({bucket_type})")
     signature = inspect.signature(method)
     kwargs: dict[str, Any] = {}
 
@@ -231,11 +270,12 @@ def ensure_bucket(client: Any, bucket_id: str, bucket_type: str) -> None:
         message = str(exc).lower()
         status_code = getattr(exc, "status_code", None)
         if status_code == 409 or "already exists" in message or "exists" in message:
+            log_debug(debug, f"Bucket already exists: {bucket_id}")
             return
         raise
 
 
-def insert_events(client: Any, bucket_id: str, events: list[Event]) -> None:
+def insert_events(client: Any, bucket_id: str, events: list[Event], debug: bool = False) -> None:
     method = (
         getattr(client, "insert_events", None)
         or getattr(client, "insert", None)
@@ -244,6 +284,7 @@ def insert_events(client: Any, bucket_id: str, events: list[Event]) -> None:
     if method is None:
         raise RuntimeError("The installed ActivityWatch client does not expose an event insertion method.")
 
+    log_debug(debug, f"Inserting {len(events)} event(s) into {bucket_id}")
     signature = inspect.signature(method)
     parameters = [
         name for name in signature.parameters if name not in {"self", "cls"}
@@ -322,29 +363,34 @@ def sync_days(
     last_synced_date: str | None,
     client_hostname: str,
     sync_status_path: Path,
+    debug: bool = False,
 ) -> tuple[int, str | None]:
     app_bucket_id = f"aw-watcher-window_{client_hostname}"
     afk_bucket_id = f"aw-watcher-afk_{client_hostname}"
 
-    ensure_bucket(client, app_bucket_id, "currentwindow")
-    ensure_bucket(client, afk_bucket_id, "afkstatus")
+    log_debug(debug, f"Target bucket IDs: {app_bucket_id}, {afk_bucket_id}")
+    ensure_bucket(client, app_bucket_id, "currentwindow", debug=debug)
+    ensure_bucket(client, afk_bucket_id, "afkstatus", debug=debug)
 
     processed_dates = 0
     last_synced_value = last_synced_date
 
     for date_text in sorted(grouped_entries):
         if last_synced_value is not None and date_text <= last_synced_value:
+            log_debug(debug, f"Skipping already-synced day: {date_text}")
             continue
 
         app_events, afk_events = create_events_for_day(date_text, grouped_entries[date_text])
         if not app_events:
+            log_debug(debug, f"Skipping day with no app events: {date_text}")
             continue
 
-        insert_events(client, app_bucket_id, app_events)
-        insert_events(client, afk_bucket_id, afk_events)
+        log_debug(debug, f"Importing {date_text}: {len(app_events)} app event(s), {len(afk_events)} afk event(s)")
+        insert_events(client, app_bucket_id, app_events, debug=debug)
+        insert_events(client, afk_bucket_id, afk_events, debug=debug)
 
         last_synced_value = date_text
-        save_last_synced_date(sync_status_path, last_synced_value)
+        save_last_synced_date(sync_status_path, last_synced_value, debug=debug)
         processed_dates += 1
 
     return processed_dates, last_synced_value
@@ -357,9 +403,14 @@ def main() -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1
 
+    debug = get_debug_flag(config)
+
     log_file_path = resolve_path(config["log_file_path"], BASE_DIR)
     sync_status_path = resolve_path(config["sync_status_file"], BASE_DIR)
     aw_hostname = str(config["aw_hostname"])
+    log_debug(debug, f"Resolved log path: {log_file_path}")
+    log_debug(debug, f"Resolved sync status path: {sync_status_path}")
+    log_debug(debug, f"ActivityWatch host: {aw_hostname}")
 
     try:
         aw_port = int(config["aw_port"])
@@ -368,9 +419,11 @@ def main() -> int:
         return 1
 
     aw_client_hostname = str(config["aw_client_hostname"])
+    log_debug(debug, f"ActivityWatch port: {aw_port}")
+    log_debug(debug, f"ActivityWatch client hostname: {aw_client_hostname}")
 
     try:
-        grouped_entries = parse_log_file(log_file_path)
+        grouped_entries = parse_log_file(log_file_path, debug=debug)
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -382,10 +435,11 @@ def main() -> int:
         print("No valid daily usage blocks were found.")
         return 0
 
-    last_synced_date = load_last_synced_date(sync_status_path)
+    log_debug(debug, f"Parsed {len(grouped_entries)} day block(s) from log")
+    last_synced_date = load_last_synced_date(sync_status_path, debug=debug)
 
     try:
-        client = build_activitywatch_client(aw_client_hostname, aw_hostname, aw_port)
+        client = build_activitywatch_client(aw_client_hostname, aw_hostname, aw_port, debug=debug)
     except Exception as exc:
         print(f"Failed to initialize ActivityWatch client: {exc}", file=sys.stderr)
         return 1
@@ -397,6 +451,7 @@ def main() -> int:
             last_synced_date=last_synced_date,
             client_hostname=aw_client_hostname,
             sync_status_path=sync_status_path,
+            debug=debug,
         )
     except Exception as exc:
         print(f"Failed to synchronize with ActivityWatch: {exc}", file=sys.stderr)
@@ -410,6 +465,7 @@ def main() -> int:
                 pass
 
     print(f"Imported {processed_dates} day(s) into ActivityWatch.")
+    log_debug(debug, "Import run completed")
     return 0
 
 
