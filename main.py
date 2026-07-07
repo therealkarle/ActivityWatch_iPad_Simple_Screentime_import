@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 import sys
+from functools import lru_cache
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,9 @@ DEFAULT_CONFIG = {
     "activitywatch_base_url": "http://127.0.0.1:5600",
     "activitywatch_hostname": "Florian_IPad_SimpleScreentime",
     "activitywatch_bucket_hostname": None,
+    "start_time": 0,
+    "wake_up_time": 600,
+    "backup_intervals": "",
     "sync_status_file": "sync_status.json",
     "debug": False,
 }
@@ -45,6 +49,24 @@ DURATION_PATTERN = re.compile(
 @dataclass(frozen=True)
 class ParsedEntry:
     app_name: str
+    duration_seconds: int
+
+
+@dataclass(frozen=True)
+class TimeWindow:
+    label: str
+    start: datetime
+    end: datetime
+
+    @property
+    def capacity_seconds(self) -> int:
+        return max(0, int((self.end - self.start).total_seconds()))
+
+
+@dataclass(frozen=True)
+class PlannedSegment:
+    app_name: str
+    start: datetime
     duration_seconds: int
 
 
@@ -101,6 +123,367 @@ def get_debug_flag(config: dict[str, Any]) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def parse_clock_minutes(value: Any, *, allow_2400: bool = False, field_name: str = "time") -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a clock value, not a boolean.")
+
+    raw_text: str
+    if isinstance(value, int):
+        raw_text = str(value)
+    elif isinstance(value, str):
+        raw_text = value.strip()
+    else:
+        raise ValueError(f"{field_name} must be a number or string in HHMM format.")
+
+    if not raw_text:
+        raise ValueError(f"{field_name} must not be empty.")
+
+    if ":" in raw_text:
+        parts = raw_text.split(":")
+        if len(parts) != 2 or not parts[0].strip().isdigit() or not parts[1].strip().isdigit():
+            raise ValueError(f"{field_name} must use HH:MM or HHMM notation.")
+        hours = int(parts[0])
+        minutes = int(parts[1])
+    else:
+        if not raw_text.isdigit():
+            raise ValueError(f"{field_name} must use HHMM notation.")
+        padded = raw_text.zfill(4)
+        hours = int(padded[:-2])
+        minutes = int(padded[-2:])
+
+    if hours == 24 and minutes == 0 and allow_2400:
+        return 24 * 60
+
+    if hours < 0 or hours > 23:
+        raise ValueError(f"{field_name} hour must be between 0 and 23.")
+    if minutes < 0 or minutes > 59:
+        raise ValueError(f"{field_name} minute must be between 0 and 59.")
+
+    return hours * 60 + minutes
+
+
+def parse_backup_intervals(raw_value: Any) -> list[tuple[int, int]]:
+    if raw_value is None:
+        return []
+
+    if isinstance(raw_value, (list, tuple)):
+        if len(raw_value) == 0:
+            return []
+        intervals: list[tuple[int, int]] = []
+        for index, item in enumerate(raw_value, start=1):
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise ValueError(
+                    "backup_intervals must contain pairs like [2200, 2400] or strings like [2200;2400]."
+                )
+            start = parse_clock_minutes(item[0], field_name=f"backup_intervals[{index}].start")
+            end = parse_clock_minutes(item[1], allow_2400=True, field_name=f"backup_intervals[{index}].end")
+            intervals.append((start, end))
+    else:
+        text = str(raw_value).strip()
+        if not text:
+            return []
+
+        matches = list(re.finditer(r"\[\s*([^;\]]+)\s*;\s*([^\]]+)\s*\]", text))
+        if not matches:
+            raise ValueError(
+                "backup_intervals must use the format [2200;2400]; [1200;1300]."
+            )
+
+        intervals = []
+        for index, match in enumerate(matches, start=1):
+            start_text = match.group(1).strip()
+            end_text = match.group(2).strip()
+            start = parse_clock_minutes(start_text, field_name=f"backup_intervals[{index}].start")
+            end = parse_clock_minutes(end_text, allow_2400=True, field_name=f"backup_intervals[{index}].end")
+            intervals.append((start, end))
+
+    normalized: list[tuple[int, int]] = []
+    for index, (start, end) in enumerate(intervals, start=1):
+        if start >= end:
+            raise ValueError(f"backup_intervals[{index}] must have a start that is earlier than the end.")
+        if start < 0 or start >= 24 * 60:
+            raise ValueError(f"backup_intervals[{index}].start must be within the day.")
+        if end < 0 or end > 24 * 60:
+            raise ValueError(f"backup_intervals[{index}].end must be within the day.")
+        normalized.append((start, end))
+
+    for left_index, (left_start, left_end) in enumerate(normalized):
+        for right_index in range(left_index + 1, len(normalized)):
+            right_start, right_end = normalized[right_index]
+            if left_start < right_end and right_start < left_end:
+                raise ValueError("backup_intervals must not overlap.")
+
+    return normalized
+
+
+def minutes_to_clock_label(minutes: int) -> str:
+    if minutes == 24 * 60:
+        return "24:00"
+    hours, remainder = divmod(minutes, 60)
+    return f"{hours:02d}:{remainder:02d}"
+
+
+def build_time_window(day_start: datetime, start_minute: int, end_minute: int, label: str) -> TimeWindow:
+    start = day_start + timedelta(minutes=start_minute)
+    end = day_start + timedelta(minutes=end_minute)
+    return TimeWindow(label=label, start=start, end=end)
+
+
+def build_planning_windows(
+    day_text: str,
+    start_time: int,
+    wake_up_time: int,
+    backup_intervals: list[tuple[int, int]],
+) -> list[TimeWindow]:
+    if start_time < 0 or start_time >= 24 * 60:
+        raise ValueError("start_time must be within the day.")
+    if wake_up_time <= start_time or wake_up_time > 24 * 60:
+        raise ValueError("wake_up_time must be later than start_time and within the day.")
+
+    day_start = datetime.strptime(day_text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    windows: list[TimeWindow] = []
+
+    windows.append(
+        build_time_window(
+            day_start,
+            start_time,
+            wake_up_time,
+            f"primary:{minutes_to_clock_label(start_time)}-{minutes_to_clock_label(wake_up_time)}",
+        )
+    )
+
+    for index, (start_minute, end_minute) in enumerate(backup_intervals, start=1):
+        if start_minute < 0 or end_minute > 24 * 60:
+            raise ValueError(f"backup_intervals[{index}] must stay within a single day.")
+        if not (end_minute <= start_time or start_minute >= wake_up_time):
+            raise ValueError("backup_intervals must not overlap the primary window.")
+        windows.append(
+            build_time_window(
+                day_start,
+                start_minute,
+                end_minute,
+                f"backup:{minutes_to_clock_label(start_minute)}-{minutes_to_clock_label(end_minute)}",
+            )
+        )
+
+    relevant_backups = [
+        (max(wake_up_time, start_minute), min(24 * 60, end_minute))
+        for start_minute, end_minute in backup_intervals
+        if end_minute > wake_up_time
+    ]
+    relevant_backups.sort()
+
+    cursor = wake_up_time
+    for start_minute, end_minute in relevant_backups:
+        if start_minute > cursor:
+            windows.append(
+                build_time_window(
+                    day_start,
+                    cursor,
+                    start_minute,
+                    f"fallback:{minutes_to_clock_label(cursor)}-{minutes_to_clock_label(start_minute)}",
+                )
+            )
+        cursor = max(cursor, end_minute)
+
+    if cursor < 24 * 60:
+        windows.append(
+            build_time_window(
+                day_start,
+                cursor,
+                24 * 60,
+                f"fallback:{minutes_to_clock_label(cursor)}-24:00",
+            )
+        )
+
+    # Drop any zero-length windows from degenerate configurations.
+    return [window for window in windows if window.capacity_seconds > 0]
+
+
+def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWindow], debug: bool = False) -> list[PlannedSegment]:
+    if not entries or not windows:
+        return []
+
+    durations = [entry.duration_seconds for entry in entries]
+    total_duration = sum(durations)
+    total_capacity = sum(window.capacity_seconds for window in windows)
+    log_debug(debug, f"Total screentime: {total_duration} seconds")
+    log_debug(debug, f"Available window capacity: {total_capacity} seconds")
+
+    if total_duration > total_capacity:
+        raise ValueError(
+            "The configured time windows do not provide enough capacity for the day "
+            f"({total_duration} seconds required, {total_capacity} seconds available)."
+        )
+
+    capacities = [window.capacity_seconds for window in windows]
+    suffix_capacities = [0] * (len(capacities) + 1)
+    for index in range(len(capacities) - 1, -1, -1):
+        suffix_capacities[index] = suffix_capacities[index + 1] + capacities[index]
+
+    infinite_cost = (10**9, 10**18)
+
+    def add_cost(cost: tuple[int, int], splits: int = 0, waste: int = 0) -> tuple[int, int]:
+        return cost[0] + splits, cost[1] + waste
+
+    @lru_cache(maxsize=None)
+    def solve(block_index: int, window_index: int, window_remaining: int, block_remaining: int) -> tuple[int, int]:
+        if block_index >= len(durations):
+            waste = window_remaining + suffix_capacities[window_index + 1]
+            return 0, waste
+
+        if window_index >= len(windows):
+            return infinite_cost
+
+        current_need = durations[block_index] if block_remaining < 0 else block_remaining
+
+        if current_need <= 0:
+            return solve(block_index + 1, window_index, window_remaining, -1)
+
+        if window_remaining <= 0:
+            if window_index + 1 >= len(windows):
+                return infinite_cost
+            return solve(block_index, window_index + 1, capacities[window_index + 1], current_need)
+
+        if current_need <= window_remaining:
+            return solve(block_index + 1, window_index, window_remaining - current_need, -1)
+
+        if block_remaining < 0:
+            candidates: list[tuple[int, int]] = []
+
+            if window_index + 1 < len(windows):
+                skip_cost = solve(block_index, window_index + 1, capacities[window_index + 1], current_need)
+                candidates.append(add_cost(skip_cost, waste=window_remaining))
+
+                split_cost = solve(
+                    block_index,
+                    window_index + 1,
+                    capacities[window_index + 1],
+                    current_need - window_remaining,
+                )
+                candidates.append(add_cost(split_cost, splits=1))
+
+            if not candidates:
+                return infinite_cost
+
+            return min(candidates)
+
+        if window_index + 1 >= len(windows):
+            return infinite_cost
+
+        return solve(
+            block_index,
+            window_index + 1,
+            capacities[window_index + 1],
+            current_need - window_remaining,
+        )
+
+    def transition_candidates(
+        block_index: int,
+        window_index: int,
+        window_remaining: int,
+        block_remaining: int,
+    ) -> list[tuple[str, tuple[int, int, int, int], int, int, int]]:
+        if block_index >= len(durations):
+            return []
+
+        current_need = durations[block_index] if block_remaining < 0 else block_remaining
+
+        if current_need <= 0:
+            return [("advance_block", (block_index + 1, window_index, window_remaining, -1), 0, 0, 0)]
+
+        if window_remaining <= 0:
+            if window_index + 1 >= len(windows):
+                return []
+            return [("advance_window", (block_index, window_index + 1, capacities[window_index + 1], current_need), 0, 0, 0)]
+
+        if current_need <= window_remaining:
+            return [("place_full", (block_index + 1, window_index, window_remaining - current_need, -1), 0, 0, current_need)]
+
+        if block_remaining < 0:
+            candidates = []
+            if window_index + 1 < len(windows):
+                candidates.append(
+                    (
+                        "skip",
+                        (block_index, window_index + 1, capacities[window_index + 1], current_need),
+                        0,
+                        window_remaining,
+                        0,
+                    )
+                )
+                candidates.append(
+                    (
+                        "split",
+                        (block_index, window_index + 1, capacities[window_index + 1], current_need - window_remaining),
+                        1,
+                        0,
+                        window_remaining,
+                    )
+                )
+            return candidates
+
+        if window_index + 1 >= len(windows):
+            return []
+
+        return [
+            (
+                "continue_split",
+                (block_index, window_index + 1, capacities[window_index + 1], current_need - window_remaining),
+                0,
+                0,
+                window_remaining,
+            )
+        ]
+
+    def rank_transition(
+        transition: tuple[str, tuple[int, int, int, int], int, int, int]
+    ) -> tuple[int, int, int]:
+        action, next_state, extra_splits, extra_waste, _ = transition
+        next_cost = solve(*next_state)
+        return next_cost[0] + extra_splits, next_cost[1] + extra_waste, {
+            "place_full": 0,
+            "advance_block": 1,
+            "advance_window": 2,
+            "skip": 3,
+            "continue_split": 4,
+            "split": 5,
+        }[action]
+
+    segments: list[PlannedSegment] = []
+    state = (0, 0, capacities[0], -1)
+
+    while state[0] < len(durations):
+        candidates = transition_candidates(*state)
+        if not candidates:
+            raise ValueError("Could not plan the configured screentime into the available time windows.")
+
+        action, next_state, extra_splits, extra_waste, segment_seconds = min(candidates, key=rank_transition)
+        block_index, window_index, window_remaining, block_remaining = state
+        current_need = durations[block_index] if block_remaining < 0 else block_remaining
+        window = windows[window_index]
+        used_seconds = window.capacity_seconds - window_remaining
+        segment_start = window.start + timedelta(seconds=used_seconds)
+
+        if action in {"place_full", "split", "continue_split"}:
+            segments.append(
+                PlannedSegment(
+                    app_name=entries[block_index].app_name,
+                    start=segment_start,
+                    duration_seconds=segment_seconds,
+                )
+            )
+
+        log_debug(
+            debug,
+            f"Planner action={action} block={block_index + 1}/{len(durations)} "
+            f"window={window.label} remaining={window_remaining} need={current_need}",
+        )
+        state = next_state
+
+    return segments
 
 
 def parse_duration_to_seconds(duration_text: str) -> int | None:
@@ -354,35 +737,48 @@ def insert_events(client: Any, bucket_id: str, events: list[Event], debug: bool 
     raise RuntimeError("The installed ActivityWatch client does not accept event insertion arguments.")
 
 
-def create_events_for_day(day_text: str, entries: Iterable[ParsedEntry]) -> tuple[list[Event], list[Event]]:
-    day_start = datetime.strptime(day_text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    current_start = day_start
+def create_events_for_day(
+    day_text: str,
+    entries: Iterable[ParsedEntry],
+    *,
+    start_time: int,
+    wake_up_time: int,
+    backup_intervals: list[tuple[int, int]],
+    debug: bool = False,
+) -> tuple[list[Event], list[Event]]:
+    entry_list = list(entries)
+    if not entry_list:
+        return [], []
+
+    planning_windows = build_planning_windows(day_text, start_time, wake_up_time, backup_intervals)
+    planned_segments = plan_entries_into_windows(entry_list, planning_windows, debug=debug)
 
     app_events: list[Event] = []
     afk_events: list[Event] = []
 
-    for entry in entries:
-        duration = timedelta(seconds=entry.duration_seconds)
+    for segment in planned_segments:
+        duration = timedelta(seconds=segment.duration_seconds)
         app_events.append(
             Event(
-                timestamp=current_start,
+                timestamp=segment.start,
                 duration=duration,
                 data={
-                    "app": entry.app_name,
-                    "title": entry.app_name,
-                    "usage_seconds": entry.duration_seconds,
+                    "app": segment.app_name,
+                    "title": segment.app_name,
+                    "usage_seconds": segment.duration_seconds,
                 },
             )
         )
         afk_events.append(
             Event(
-                timestamp=current_start,
+                timestamp=segment.start,
                 duration=duration,
                 data={"status": "not-afk"},
             )
         )
-        current_start += duration
 
+    app_events.sort(key=lambda event: event.timestamp)
+    afk_events.sort(key=lambda event: event.timestamp)
     return app_events, afk_events
 
 
@@ -392,6 +788,9 @@ def sync_days(
     last_synced_date: str | None,
     client_hostname: str,
     sync_status_path: Path,
+    start_time: int,
+    wake_up_time: int,
+    backup_intervals: list[tuple[int, int]],
     debug: bool = False,
 ) -> tuple[int, str | None]:
     app_bucket_id = f"aw-watcher-window_{client_hostname}"
@@ -409,7 +808,14 @@ def sync_days(
             log_debug(debug, f"Skipping already-synced day: {date_text}")
             continue
 
-        app_events, afk_events = create_events_for_day(date_text, grouped_entries[date_text])
+        app_events, afk_events = create_events_for_day(
+            date_text,
+            grouped_entries[date_text],
+            start_time=start_time,
+            wake_up_time=wake_up_time,
+            backup_intervals=backup_intervals,
+            debug=debug,
+        )
         if not app_events:
             log_debug(debug, f"Skipping day with no app events: {date_text}")
             continue
@@ -458,12 +864,21 @@ def main() -> int:
         "aw_bucket_hostname",
         default=None,
     )
+    start_time = parse_clock_minutes(get_config_value(config, "start_time", default=0), field_name="start_time")
+    wake_up_time = parse_clock_minutes(
+        get_config_value(config, "wake_up_time", default=600),
+        field_name="wake_up_time",
+    )
+    backup_intervals = parse_backup_intervals(get_config_value(config, "backup_intervals", default=[]))
     if aw_bucket_hostname is not None:
         aw_bucket_hostname = str(aw_bucket_hostname)
     log_debug(debug, f"Resolved log path: {log_file_path}")
     log_debug(debug, f"Resolved sync status path: {sync_status_path}")
     log_debug(debug, f"ActivityWatch base URL: {aw_base_url}")
     log_debug(debug, f"ActivityWatch client hostname: {aw_client_hostname}")
+    log_debug(debug, f"Screen time start: {minutes_to_clock_label(start_time)}")
+    log_debug(debug, f"Wake up time: {minutes_to_clock_label(wake_up_time)}")
+    log_debug(debug, f"Backup intervals: {backup_intervals}")
     if aw_bucket_hostname is not None:
         log_debug(debug, f"ActivityWatch bucket hostname: {aw_bucket_hostname}")
 
@@ -498,6 +913,9 @@ def main() -> int:
             last_synced_date=last_synced_date,
             client_hostname=aw_client_hostname,
             sync_status_path=sync_status_path,
+            start_time=start_time,
+            wake_up_time=wake_up_time,
+            backup_intervals=backup_intervals,
             debug=debug,
         )
     except Exception as exc:

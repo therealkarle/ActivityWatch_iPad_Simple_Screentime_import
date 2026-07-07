@@ -13,7 +13,7 @@ The importer reads a structured text log, converts each app duration into Activi
 - Converts mixed durations such as `3h 24min`, `17min`, and `10s` into seconds
 - Skips malformed rows without stopping the import
 - Stores the last successful sync date in `sync_status.json`
-- Creates sequential ActivityWatch timelines instead of overlapping events
+- Plans each day across configurable time windows and minimizes app-block splits
 - Writes matching `not-afk` events so the ActivityWatch UI keeps the imported data visible
 
 ## Repository Structure
@@ -46,6 +46,9 @@ python -m pip install aw-client aw-core
    - `activitywatch_base_url` to your local ActivityWatch server URL
    - `activitywatch_hostname` to the client name you want to use for bucket IDs
    - `activitywatch_bucket_hostname` to the host name that should own the imported buckets in ActivityWatch
+   - `start_time` to the first clock time the synthetic day may start, using `HHMM` notation such as `0` or `600`
+   - `wake_up_time` to the point where the importer should start preferring backup windows, also in `HHMM`
+   - `backup_intervals` to a semicolon-separated list like `[2200;2400]; [1200;1300]`
    - `sync_status_file` to the state file path, if you want a different location
    - `debug` to `true` if you want detailed diagnostic output, or `false` for normal runs
 3. Keep `config.json` out of version control. It is already ignored by `.gitignore`.
@@ -63,10 +66,19 @@ On each run, the script:
 1. Reads `config.json`
 2. Loads the Screen Time log file
 3. Skips all dates that are less than or equal to the last synced date
-4. Imports each new day into ActivityWatch
-5. Writes the newest successfully processed date to `sync_status.json`
+4. Computes the total screentime for each new day, then fills the configured windows in order
+5. Imports each new day into ActivityWatch
+6. Writes the newest successfully processed date to `sync_status.json`
 
 If the log file contains malformed lines, the importer skips them and continues processing the rest of the file.
+
+Window planning works like this:
+
+1. The importer first fills the main window from `start_time` to `wake_up_time`
+2. Then it tries the configured `backup_intervals` in the order you listed them
+3. If a block does not fit in the current window, the planner prefers a later window that can hold it completely
+4. Only if no later window can hold the block intact does it split that block
+5. Remaining time falls back into the rest of the day after `wake_up_time`
 
 To reset the importer state on Windows, run:
 

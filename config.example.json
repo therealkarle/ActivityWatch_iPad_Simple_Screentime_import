@@ -3,6 +3,9 @@
   "activitywatch_base_url": "http://localhost:5600",
   "activitywatch_hostname": "Your_Device_Name",
   "activitywatch_bucket_hostname": "Your_Bucket_Host_Name",
+  "start_time": 0,
+  "wake_up_time": 600,
+  "backup_intervals": "[2200;2400]; [1200;1300]",
   "sync_status_file": "sync_status.json",
   "debug": false
 }
