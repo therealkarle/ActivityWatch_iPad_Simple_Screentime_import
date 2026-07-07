@@ -79,6 +79,7 @@ Window planning works like this:
 3. If a block does not fit in the current window, the planner prefers a later window that can hold it completely
 4. Backup windows split the current block instead of pushing it to the next morning block
 5. If there is still screentime left after all configured windows, the importer continues immediately after the last imported event
+6. The importer never moves any app time into the next calendar day; if that would be required, the import fails for that day
 
 To reset the importer state on Windows, run:
 

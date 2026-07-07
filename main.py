@@ -283,6 +283,8 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
         for entry in entries
     ]
     last_event_end: datetime | None = None
+    day_start = windows[0].start.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
 
     for window_index, window in enumerate(windows):
         window_remaining = window.capacity_seconds
@@ -381,19 +383,30 @@ def plan_entries_into_windows(entries: list[ParsedEntry], windows: list[TimeWind
     while remaining_entries:
         current_entry = remaining_entries.pop(0)
         current_remaining = int(current_entry["remaining_seconds"])
+        available_seconds = int((day_end - spill_cursor).total_seconds())
+        if available_seconds <= 0:
+            raise ValueError(
+                "The configured day cannot be extended beyond midnight without moving app time to the next day."
+            )
+
+        placed_seconds = min(current_remaining, available_seconds)
         segments.append(
             PlannedSegment(
                 app_name=str(current_entry["app_name"]),
                 start=spill_cursor,
-                duration_seconds=current_remaining,
+                duration_seconds=placed_seconds,
             )
         )
-        spill_cursor += timedelta(seconds=current_remaining)
+        spill_cursor += timedelta(seconds=placed_seconds)
         last_event_end = spill_cursor
         log_debug(
             debug,
-            f"Spillover continuation from last event end: {current_entry['app_name']} ({current_remaining}s)",
+            f"Spillover continuation from last event end: {current_entry['app_name']} ({placed_seconds}s of {current_remaining}s)",
         )
+        if placed_seconds < current_remaining:
+            raise ValueError(
+                "The configured day cannot fit all app time before midnight without moving app time to the next day."
+            )
 
     return segments
 

@@ -119,6 +119,21 @@ class PlannerTests(unittest.TestCase):
             ],
         )
 
+    def test_create_events_rejects_cross_day_spillover(self) -> None:
+        entries = [
+            main.ParsedEntry("AppA", 8 * 60),
+            main.ParsedEntry("AppB", 15 * 60),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "cannot fit all app time before midnight"):
+            main.create_events_for_day(
+                "2026-07-07",
+                entries,
+                start_time=0,
+                wake_up_time=5,
+                backup_intervals=[(23 * 60 + 50, 23 * 60 + 55)],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
