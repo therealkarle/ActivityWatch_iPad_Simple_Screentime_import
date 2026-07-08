@@ -954,6 +954,7 @@ def create_events_for_day(
 
     app_events: list[Event] = []
     afk_events: list[Event] = []
+    primary_window_end = planning_windows[0].end
 
     for segment in planned_segments:
         duration = timedelta(seconds=segment.duration_seconds)
@@ -978,6 +979,20 @@ def create_events_for_day(
                 timestamp=segment.start,
                 duration=duration,
                 data={"status": "not-afk"},
+            )
+        )
+
+    morning_segments = [segment for segment in planned_segments if segment.start < primary_window_end]
+    if morning_segments:
+        morning_end = max(
+            segment.start + timedelta(seconds=segment.duration_seconds)
+            for segment in morning_segments
+        )
+        afk_events.append(
+            Event(
+                timestamp=morning_end,
+                duration=timedelta(minutes=10),
+                data={"status": "afk"},
             )
         )
 

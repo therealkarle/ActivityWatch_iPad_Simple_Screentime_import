@@ -188,7 +188,6 @@ class PlannerTests(unittest.TestCase):
             app_name_suffix_overrides={"AppB": " - Private"},
         )
 
-        self.assertEqual(len(app_events), len(afk_events))
         self.assertEqual([event.timestamp for event in app_events], sorted(event.timestamp for event in app_events))
         self.assertEqual(carryover, [])
         self.assertEqual([event.data["app"] for event in app_events], [event.data["title"] for event in app_events])
@@ -196,11 +195,22 @@ class PlannerTests(unittest.TestCase):
         self.assertIn("AppB - Private", [event.data["app"] for event in app_events])
         self.assertIn("AppC - FlorianIPad", [event.data["app"] for event in app_events])
 
-        previous_end = None
-        for event in app_events:
-            if previous_end is not None:
-                self.assertGreaterEqual(event.timestamp, previous_end)
-            previous_end = event.timestamp + event.duration
+        not_afk_events = [event for event in afk_events if event.data["status"] == "not-afk"]
+        afk_only_events = [event for event in afk_events if event.data["status"] == "afk"]
+        primary_end = datetime(2026, 7, 7, tzinfo=main.LOCAL_TIMEZONE) + timedelta(minutes=10)
+        morning_app_events = [event for event in app_events if event.timestamp < primary_end]
+
+        self.assertEqual(len(not_afk_events), len(app_events))
+        self.assertEqual(len(afk_only_events), 1)
+        self.assertEqual(
+            [(event.timestamp, event.duration) for event in not_afk_events],
+            [(event.timestamp, event.duration) for event in app_events],
+        )
+        self.assertEqual(
+            afk_only_events[0].timestamp,
+            morning_app_events[-1].timestamp + morning_app_events[-1].duration,
+        )
+        self.assertEqual(afk_only_events[0].duration, timedelta(minutes=10))
 
     def test_create_events_applies_discount_factors_before_planning(self) -> None:
         entries = [
@@ -222,14 +232,26 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(carryover, [])
         self.assertEqual(len(app_events), 2)
-        self.assertEqual(len(afk_events), 2)
         self.assertEqual(
             [event.data["app"] for event in app_events],
             ["AppA - FlorianIPad", "AppB - Private"],
         )
         self.assertEqual([event.data["usage_seconds"] for event in app_events], [5 * 60, 90])
         self.assertEqual([event.duration for event in app_events], [timedelta(minutes=5), timedelta(seconds=90)])
-        self.assertEqual([event.duration for event in afk_events], [timedelta(minutes=5), timedelta(seconds=90)])
+        not_afk_events = [event for event in afk_events if event.data["status"] == "not-afk"]
+        afk_only_events = [event for event in afk_events if event.data["status"] == "afk"]
+
+        self.assertEqual(len(not_afk_events), len(app_events))
+        self.assertEqual(len(afk_only_events), 1)
+        self.assertEqual(
+            [(event.timestamp, event.duration) for event in not_afk_events],
+            [(event.timestamp, event.duration) for event in app_events],
+        )
+        self.assertEqual(
+            afk_only_events[0].timestamp,
+            app_events[-1].timestamp + app_events[-1].duration,
+        )
+        self.assertEqual(afk_only_events[0].duration, timedelta(minutes=10))
 
     def test_continues_after_last_event_in_same_day(self) -> None:
         day1 = datetime(2026, 7, 7, tzinfo=main.LOCAL_TIMEZONE)
