@@ -78,9 +78,9 @@ Window planning works like this:
 2. Then it tries the configured `backup_intervals` in the order you listed them
 3. The planner looks at the full day total up front and prefers to keep app blocks intact whenever a later window can hold them completely
 4. Backup windows can keep up to 10 minutes of slack unused when that reduces splits in the final plan
-5. If a block still does not fit, the planner splits it only as far as necessary and continues the remainder on the same day
-6. Any remaining spillover is continued after the last scheduled segment, not as a separate next-day block
-7. No single event ever crosses midnight; if the day still does not fit, the importer raises an error instead of moving anything into the next day
+5. If the full day does not fit inside the configured windows, the planner fills the fallback windows first, then extends the morning window after `wake_up_time`
+6. The start block may be split so fallback windows can be filled before the morning extension is used
+7. No event is planned past midnight; if the day still does not fit, the importer raises an error instead of moving time into the next day
 
 To reset the importer state on Windows, run:
 

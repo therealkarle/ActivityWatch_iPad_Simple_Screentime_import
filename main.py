@@ -290,6 +290,52 @@ def merge_adjacent_segments(segments: list[PlannedSegment]) -> list[PlannedSegme
     return merged_segments
 
 
+def build_overflow_extension_windows(
+    windows: list[TimeWindow], overflow_seconds: int, day_end: datetime
+) -> list[TimeWindow]:
+    if overflow_seconds <= 0:
+        return []
+
+    primary_window = windows[0]
+    backup_windows = sorted(windows[1:], key=lambda window: window.start)
+    extension_windows: list[TimeWindow] = []
+    cursor = primary_window.end
+    remaining_seconds = overflow_seconds
+
+    for backup_window in backup_windows:
+        if remaining_seconds <= 0:
+            break
+        if backup_window.end <= cursor:
+            continue
+        if backup_window.start > cursor:
+            gap_seconds = int((backup_window.start - cursor).total_seconds())
+            extension_seconds = min(remaining_seconds, gap_seconds)
+            if extension_seconds > 0:
+                extension_windows.append(
+                    TimeWindow(
+                        label=f"overflow:{minutes_to_clock_label(int((cursor - cursor.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() // 60))}",
+                        start=cursor,
+                        end=cursor + timedelta(seconds=extension_seconds),
+                    )
+                )
+                remaining_seconds -= extension_seconds
+            cursor = backup_window.start
+        cursor = max(cursor, backup_window.end)
+
+    if remaining_seconds > 0 and cursor < day_end:
+        extension_seconds = min(remaining_seconds, int((day_end - cursor).total_seconds()))
+        if extension_seconds > 0:
+            extension_windows.append(
+                TimeWindow(
+                    label=f"overflow:{minutes_to_clock_label(int((cursor - cursor.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() // 60))}",
+                    start=cursor,
+                    end=cursor + timedelta(seconds=extension_seconds),
+                )
+            )
+
+    return extension_windows
+
+
 def plan_entries_into_windows(
     entries: list[ParsedEntry], windows: list[TimeWindow], debug: bool = False
 ) -> tuple[list[PlannedSegment], list[ParsedEntry]]:
@@ -306,14 +352,28 @@ def plan_entries_into_windows(
     ]
     day_start = windows[0].start.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
+    configured_capacity_seconds = sum(window.capacity_seconds for window in windows)
+    overflow_mode = total_duration > configured_capacity_seconds
+    overflow_seconds = max(0, total_duration - configured_capacity_seconds)
+    planning_windows = windows[:]
+    if overflow_mode:
+        extension_windows = build_overflow_extension_windows(windows, overflow_seconds, day_end)
+        planning_windows.extend(extension_windows)
+        log_debug(
+            debug,
+            "Extending morning window after fallback capacity is exhausted: "
+            + ", ".join(window.label for window in extension_windows),
+        )
 
     def window_reserve_seconds(window: TimeWindow) -> int:
+        if overflow_mode:
+            return 0
         return 10 * 60 if window.label.startswith("backup:") else 0
 
     def future_windows_can_hold(window_index: int, seconds: int) -> bool:
-        return any(future_window.capacity_seconds >= seconds for future_window in windows[window_index + 1 :])
+        return any(future_window.capacity_seconds >= seconds for future_window in planning_windows[window_index + 1 :])
 
-    for window_index, window in enumerate(windows):
+    for window_index, window in enumerate(planning_windows):
         window_remaining = window.capacity_seconds
         cursor = window.start
         reserve_seconds = window_reserve_seconds(window)
@@ -371,7 +431,7 @@ def plan_entries_into_windows(
                 continue
 
             future_can_hold_current = future_windows_can_hold(window_index, current_remaining)
-            if future_can_hold_current and (window_is_primary or window_is_backup):
+            if not overflow_mode and future_can_hold_current and (window_is_primary or window_is_backup):
                 log_debug(
                     debug,
                     f"Left gap open in {window.label} so block can stay intact later: "
@@ -413,7 +473,7 @@ def plan_entries_into_windows(
                 remaining_entries.pop(0)
 
     spill_cursor = max((segment.start + timedelta(seconds=segment.duration_seconds) for segment in segments), default=windows[0].start)
-    while remaining_entries and spill_cursor < day_end:
+    while not overflow_mode and remaining_entries and spill_cursor < day_end:
         current_entry = remaining_entries[0]
         current_remaining = int(current_entry["remaining_seconds"])
         available_seconds = int((day_end - spill_cursor).total_seconds())

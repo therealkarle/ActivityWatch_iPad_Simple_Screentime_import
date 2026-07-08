@@ -120,10 +120,44 @@ class PlannerTests(unittest.TestCase):
             [(event.data["app"], event.timestamp.astimezone(main.LOCAL_TIMEZONE), event.duration) for event in app_events_day1],
             [
                 ("AppB", day1, timedelta(minutes=3)),
-                ("AppA", day1 + timedelta(minutes=3), timedelta(minutes=2)),
-                ("AppA", day1 + timedelta(minutes=20), timedelta(minutes=6)),
+                ("AppA", day1 + timedelta(minutes=3), timedelta(minutes=3)),
+                ("AppA", day1 + timedelta(minutes=20), timedelta(minutes=5)),
             ],
         )
+        self.assertEqual(carryover, [])
+
+    def test_overflow_mode_still_uses_backup_windows(self) -> None:
+        day = datetime(2026, 7, 7, tzinfo=timezone.utc)
+        windows = [
+            main.TimeWindow("primary:00:00-00:05", day, day + timedelta(minutes=5)),
+            main.TimeWindow("backup:00:20-00:25", day + timedelta(minutes=20), day + timedelta(minutes=25)),
+        ]
+        entries = [
+            main.ParsedEntry("AppA", 8 * 60),
+            main.ParsedEntry("AppB", 3 * 60),
+            main.ParsedEntry("AppC", 5 * 60),
+        ]
+
+        segments, carryover = main.plan_entries_into_windows(entries, windows)
+
+        self.assertEqual([segment.app_name for segment in segments], ["AppB", "AppA", "AppC"])
+        self.assertEqual([segment.duration_seconds for segment in segments], [3 * 60, 8 * 60, 5 * 60])
+        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(minutes=3), day + timedelta(minutes=20)])
+        self.assertEqual(carryover, [])
+
+    def test_overflow_extends_morning_window_after_fallbacks_are_full(self) -> None:
+        day = datetime(2026, 7, 7, tzinfo=timezone.utc)
+        windows = [
+            main.TimeWindow("primary:00:00-06:00", day, day + timedelta(hours=6)),
+            main.TimeWindow("backup:22:00-24:00", day + timedelta(hours=22), day + timedelta(hours=24)),
+        ]
+        entries = [main.ParsedEntry("AppA", 9 * 60 * 60)]
+
+        segments, carryover = main.plan_entries_into_windows(entries, windows)
+
+        self.assertEqual([segment.app_name for segment in segments], ["AppA", "AppA"])
+        self.assertEqual([segment.duration_seconds for segment in segments], [7 * 60 * 60, 2 * 60 * 60])
+        self.assertEqual([segment.start for segment in segments], [day, day + timedelta(hours=22)])
         self.assertEqual(carryover, [])
 
     def test_carryover_only_contains_time_beyond_midnight(self) -> None:
