@@ -7,6 +7,10 @@
   "activitywatch_app_name_suffix_overrides": {
     "Safari": " - Private"
   },
+  "activitywatch_app_discount_factor": 1.0,
+  "activitywatch_app_discount_factor_overrides": {
+    "Safari": 0.75
+  },
   "start_time": 0,
   "wake_up_time": 600,
   "backup_intervals": "[2200;2400]; [1200;1300]",

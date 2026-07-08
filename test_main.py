@@ -40,6 +40,74 @@ class PlannerTests(unittest.TestCase):
             "Notes - FlorianIPad",
         )
 
+    def test_apply_activitywatch_app_discount_factors_uses_global_factor(self) -> None:
+        entries = [
+            main.ParsedEntry("Safari", 10 * 60),
+            main.ParsedEntry("Notes", 5 * 60),
+        ]
+
+        discounted = main.apply_activitywatch_app_discount_factors(entries, global_factor=0.5)
+
+        self.assertEqual(
+            discounted,
+            [
+                main.ParsedEntry("Safari", 5 * 60),
+                main.ParsedEntry("Notes", 2 * 60 + 30),
+            ],
+        )
+
+    def test_apply_activitywatch_app_discount_factors_prefers_per_app_override(self) -> None:
+        entries = [
+            main.ParsedEntry("Safari", 10 * 60),
+            main.ParsedEntry("Notes", 5 * 60),
+        ]
+
+        discounted = main.apply_activitywatch_app_discount_factors(
+            entries,
+            global_factor=0.5,
+            per_app_factors={"Safari": 0.25},
+        )
+
+        self.assertEqual(
+            discounted,
+            [
+                main.ParsedEntry("Safari", 2 * 60 + 30),
+                main.ParsedEntry("Notes", 2 * 60 + 30),
+            ],
+        )
+
+    def test_apply_activitywatch_app_discount_factors_rounds_and_drops_zero_values(self) -> None:
+        entries = [
+            main.ParsedEntry("Safari", 1),
+            main.ParsedEntry("Notes", 3),
+            main.ParsedEntry("Music", 4),
+        ]
+
+        discounted = main.apply_activitywatch_app_discount_factors(
+            entries,
+            global_factor=0.25,
+        )
+
+        self.assertEqual(
+            discounted,
+            [
+                main.ParsedEntry("Notes", 1),
+            ],
+        )
+
+    def test_get_activitywatch_app_discount_factor_config_reads_global_and_overrides(self) -> None:
+        config = {
+            "activitywatch_app_discount_factor": "0.75",
+            "activitywatch_app_discount_factor_overrides": {
+                "Safari": 0.5,
+            },
+        }
+
+        global_factor, overrides = main.get_activitywatch_app_discount_factor_config(config)
+
+        self.assertEqual(global_factor, 0.75)
+        self.assertEqual(overrides, {"Safari": 0.5})
+
     def test_parse_backup_intervals_preserves_order(self) -> None:
         intervals = main.parse_backup_intervals("[2200;2400]; [1200;1300]")
         self.assertEqual(intervals, [(22 * 60, 24 * 60), (12 * 60, 13 * 60)])
@@ -133,6 +201,35 @@ class PlannerTests(unittest.TestCase):
             if previous_end is not None:
                 self.assertGreaterEqual(event.timestamp, previous_end)
             previous_end = event.timestamp + event.duration
+
+    def test_create_events_applies_discount_factors_before_planning(self) -> None:
+        entries = [
+            main.ParsedEntry("AppA", 10 * 60),
+            main.ParsedEntry("AppB", 6 * 60),
+        ]
+
+        app_events, afk_events, carryover = main.create_events_for_day(
+            "2026-07-07",
+            entries,
+            start_time=0,
+            wake_up_time=20,
+            backup_intervals=[],
+            app_name_suffix=" - FlorianIPad",
+            app_name_suffix_overrides={"AppB": " - Private"},
+            app_name_discount_factor=0.5,
+            app_name_discount_factor_overrides={"AppB": 0.25},
+        )
+
+        self.assertEqual(carryover, [])
+        self.assertEqual(len(app_events), 2)
+        self.assertEqual(len(afk_events), 2)
+        self.assertEqual(
+            [event.data["app"] for event in app_events],
+            ["AppA - FlorianIPad", "AppB - Private"],
+        )
+        self.assertEqual([event.data["usage_seconds"] for event in app_events], [5 * 60, 90])
+        self.assertEqual([event.duration for event in app_events], [timedelta(minutes=5), timedelta(seconds=90)])
+        self.assertEqual([event.duration for event in afk_events], [timedelta(minutes=5), timedelta(seconds=90)])
 
     def test_continues_after_last_event_in_same_day(self) -> None:
         day1 = datetime(2026, 7, 7, tzinfo=main.LOCAL_TIMEZONE)

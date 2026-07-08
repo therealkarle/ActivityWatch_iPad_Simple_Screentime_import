@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import json
 import re
 import sys
@@ -145,6 +146,60 @@ def get_activitywatch_app_name_suffix_config(config: dict[str, Any]) -> tuple[st
     return global_suffix, overrides
 
 
+def parse_discount_factor(value: Any, *, field_name: str = "discount_factor") -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a number between 0 and 1.")
+
+    if isinstance(value, (int, float)):
+        factor = float(value)
+    elif isinstance(value, str):
+        raw_text = value.strip()
+        if not raw_text:
+            raise ValueError(f"{field_name} must not be empty.")
+        factor = float(raw_text)
+    else:
+        raise ValueError(f"{field_name} must be a number between 0 and 1.")
+
+    if not math.isfinite(factor):
+        raise ValueError(f"{field_name} must be a finite number.")
+    if factor <= 0 or factor > 1:
+        raise ValueError(f"{field_name} must be greater than 0 and at most 1.")
+
+    return factor
+
+
+def get_activitywatch_app_discount_factor_config(config: dict[str, Any]) -> tuple[float, dict[str, float]]:
+    global_factor_value = get_config_value(
+        config,
+        "activitywatch_app_discount_factor",
+        "aw_app_discount_factor",
+        default=1.0,
+    )
+    global_factor = parse_discount_factor(global_factor_value, field_name="activitywatch_app_discount_factor")
+
+    overrides_value = get_config_value(
+        config,
+        "activitywatch_app_discount_factor_overrides",
+        "aw_app_discount_factor_overrides",
+        default={},
+    )
+    if overrides_value is None:
+        return global_factor, {}
+    if not isinstance(overrides_value, dict):
+        raise ValueError("activitywatch_app_discount_factor_overrides must be a JSON object.")
+
+    overrides: dict[str, float] = {}
+    for app_name, factor in overrides_value.items():
+        if not isinstance(app_name, str):
+            raise ValueError("activitywatch_app_discount_factor_overrides keys must be strings.")
+        overrides[app_name] = parse_discount_factor(
+            factor,
+            field_name=f"activitywatch_app_discount_factor_overrides[{app_name}]",
+        )
+
+    return global_factor, overrides
+
+
 def format_activitywatch_app_name(
     app_name: str,
     *,
@@ -162,6 +217,30 @@ def format_activitywatch_app_name(
     if not suffix_text:
         return app_name
     return f"{app_name}{suffix_text}"
+
+
+def apply_activitywatch_app_discount_factors(
+    entries: Iterable[ParsedEntry],
+    *,
+    global_factor: float = 1.0,
+    per_app_factors: dict[str, float] | None = None,
+) -> list[ParsedEntry]:
+    discounted_entries: list[ParsedEntry] = []
+
+    for entry in entries:
+        factor = global_factor
+        if per_app_factors is not None and entry.app_name in per_app_factors:
+            factor = per_app_factors[entry.app_name]
+
+        duration_seconds = int(round(entry.duration_seconds * factor))
+        if duration_seconds <= 0:
+            continue
+
+        discounted_entries.append(
+            ParsedEntry(app_name=entry.app_name, duration_seconds=duration_seconds)
+        )
+
+    return discounted_entries
 
 
 def get_debug_flag(config: dict[str, Any]) -> bool:
@@ -854,9 +933,19 @@ def create_events_for_day(
     backup_intervals: list[tuple[int, int]],
     app_name_suffix: str = "",
     app_name_suffix_overrides: dict[str, str] | None = None,
+    app_name_discount_factor: float = 1.0,
+    app_name_discount_factor_overrides: dict[str, float] | None = None,
     debug: bool = False,
 ) -> tuple[list[Event], list[Event], list[ParsedEntry]]:
     entry_list = list(entries)
+    if not entry_list:
+        return [], [], []
+
+    entry_list = apply_activitywatch_app_discount_factors(
+        entry_list,
+        global_factor=app_name_discount_factor,
+        per_app_factors=app_name_discount_factor_overrides,
+    )
     if not entry_list:
         return [], [], []
 
@@ -910,6 +999,8 @@ def sync_days(
     backup_intervals: list[tuple[int, int]],
     app_name_suffix: str = "",
     app_name_suffix_overrides: dict[str, str] | None = None,
+    app_name_discount_factor: float = 1.0,
+    app_name_discount_factor_overrides: dict[str, float] | None = None,
     debug: bool = False,
 ) -> tuple[int, str | None]:
     app_bucket_id = f"aw-watcher-window_{client_hostname}"
@@ -935,10 +1026,15 @@ def sync_days(
             backup_intervals=backup_intervals,
             app_name_suffix=app_name_suffix,
             app_name_suffix_overrides=app_name_suffix_overrides,
+            app_name_discount_factor=app_name_discount_factor,
+            app_name_discount_factor_overrides=app_name_discount_factor_overrides,
             debug=debug,
         )
-        if not app_events and not grouped_entries[date_text]:
-            log_debug(debug, f"Skipping day with no app events: {date_text}")
+        if not app_events:
+            log_debug(debug, f"Skipping day with no importable app events: {date_text}")
+            last_synced_value = date_text
+            save_sync_state(sync_status_path, last_synced_value, debug=debug)
+            processed_dates += 1
             continue
 
         log_debug(debug, f"Importing {date_text}: {len(app_events)} app event(s), {len(afk_events)} afk event(s)")
@@ -987,6 +1083,7 @@ def main() -> int:
         default=None,
     )
     aw_app_name_suffix, aw_app_name_suffix_overrides = get_activitywatch_app_name_suffix_config(config)
+    aw_app_discount_factor, aw_app_discount_factor_overrides = get_activitywatch_app_discount_factor_config(config)
     start_time = parse_clock_minutes(get_config_value(config, "start_time", default=0), field_name="start_time")
     wake_up_time = parse_clock_minutes(
         get_config_value(config, "wake_up_time", default=600),
@@ -1004,6 +1101,8 @@ def main() -> int:
     log_debug(debug, f"Backup intervals: {backup_intervals}")
     if aw_bucket_hostname is not None:
         log_debug(debug, f"ActivityWatch bucket hostname: {aw_bucket_hostname}")
+    log_debug(debug, f"Screen time discount factor: {aw_app_discount_factor}")
+    log_debug(debug, f"Discount factor overrides: {aw_app_discount_factor_overrides}")
 
     try:
         grouped_entries = parse_log_file(log_file_path, debug=debug)
@@ -1041,6 +1140,8 @@ def main() -> int:
             backup_intervals=backup_intervals,
             app_name_suffix=aw_app_name_suffix,
             app_name_suffix_overrides=aw_app_name_suffix_overrides,
+            app_name_discount_factor=aw_app_discount_factor,
+            app_name_discount_factor_overrides=aw_app_discount_factor_overrides,
             debug=debug,
         )
     except Exception as exc:
