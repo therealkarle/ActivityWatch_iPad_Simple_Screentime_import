@@ -13,6 +13,33 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(main.parse_clock_minutes("06:00"), 6 * 60)
         self.assertEqual(main.parse_clock_minutes("2400", allow_2400=True), 24 * 60)
 
+    def test_format_activitywatch_app_name_without_suffix_keeps_original(self) -> None:
+        self.assertEqual(main.format_activitywatch_app_name("Safari"), "Safari")
+
+    def test_format_activitywatch_app_name_uses_global_suffix(self) -> None:
+        self.assertEqual(
+            main.format_activitywatch_app_name("Safari", global_suffix=" - FlorianIPad"),
+            "Safari - FlorianIPad",
+        )
+
+    def test_format_activitywatch_app_name_prefers_per_app_override(self) -> None:
+        self.assertEqual(
+            main.format_activitywatch_app_name(
+                "Safari",
+                global_suffix=" - FlorianIPad",
+                per_app_suffixes={"Safari": " - Private"},
+            ),
+            "Safari - Private",
+        )
+        self.assertEqual(
+            main.format_activitywatch_app_name(
+                "Notes",
+                global_suffix=" - FlorianIPad",
+                per_app_suffixes={"Safari": " - Private"},
+            ),
+            "Notes - FlorianIPad",
+        )
+
     def test_parse_backup_intervals_preserves_order(self) -> None:
         intervals = main.parse_backup_intervals("[2200;2400]; [1200;1300]")
         self.assertEqual(intervals, [(22 * 60, 24 * 60), (12 * 60, 13 * 60)])
@@ -89,11 +116,17 @@ class PlannerTests(unittest.TestCase):
             start_time=0,
             wake_up_time=10,
             backup_intervals=[(30, 40)],
+            app_name_suffix=" - FlorianIPad",
+            app_name_suffix_overrides={"AppB": " - Private"},
         )
 
         self.assertEqual(len(app_events), len(afk_events))
         self.assertEqual([event.timestamp for event in app_events], sorted(event.timestamp for event in app_events))
         self.assertEqual(carryover, [])
+        self.assertEqual([event.data["app"] for event in app_events], [event.data["title"] for event in app_events])
+        self.assertIn("AppA - FlorianIPad", [event.data["app"] for event in app_events])
+        self.assertIn("AppB - Private", [event.data["app"] for event in app_events])
+        self.assertIn("AppC - FlorianIPad", [event.data["app"] for event in app_events])
 
         previous_end = None
         for event in app_events:

@@ -116,6 +116,54 @@ def get_config_value(config: dict[str, Any], *keys: str, default: Any = None) ->
     return default
 
 
+def get_activitywatch_app_name_suffix_config(config: dict[str, Any]) -> tuple[str, dict[str, str]]:
+    global_suffix_value = get_config_value(
+        config,
+        "activitywatch_app_name_suffix",
+        "aw_app_name_suffix",
+        default="",
+    )
+    global_suffix = "" if global_suffix_value is None else str(global_suffix_value)
+
+    overrides_value = get_config_value(
+        config,
+        "activitywatch_app_name_suffix_overrides",
+        "aw_app_name_suffix_overrides",
+        default={},
+    )
+    if overrides_value is None:
+        return global_suffix, {}
+    if not isinstance(overrides_value, dict):
+        raise ValueError("activitywatch_app_name_suffix_overrides must be a JSON object.")
+
+    overrides: dict[str, str] = {}
+    for app_name, suffix in overrides_value.items():
+        if not isinstance(app_name, str):
+            raise ValueError("activitywatch_app_name_suffix_overrides keys must be strings.")
+        overrides[app_name] = "" if suffix is None else str(suffix)
+
+    return global_suffix, overrides
+
+
+def format_activitywatch_app_name(
+    app_name: str,
+    *,
+    global_suffix: str = "",
+    per_app_suffixes: dict[str, str] | None = None,
+) -> str:
+    suffix = global_suffix
+    if per_app_suffixes is not None and app_name in per_app_suffixes:
+        suffix = per_app_suffixes[app_name]
+
+    if suffix is None:
+        return app_name
+
+    suffix_text = str(suffix)
+    if not suffix_text:
+        return app_name
+    return f"{app_name}{suffix_text}"
+
+
 def get_debug_flag(config: dict[str, Any]) -> bool:
     value = config.get("debug", False)
     if isinstance(value, bool):
@@ -804,6 +852,8 @@ def create_events_for_day(
     start_time: int,
     wake_up_time: int,
     backup_intervals: list[tuple[int, int]],
+    app_name_suffix: str = "",
+    app_name_suffix_overrides: dict[str, str] | None = None,
     debug: bool = False,
 ) -> tuple[list[Event], list[Event], list[ParsedEntry]]:
     entry_list = list(entries)
@@ -818,13 +868,18 @@ def create_events_for_day(
 
     for segment in planned_segments:
         duration = timedelta(seconds=segment.duration_seconds)
+        app_name = format_activitywatch_app_name(
+            segment.app_name,
+            global_suffix=app_name_suffix,
+            per_app_suffixes=app_name_suffix_overrides,
+        )
         app_events.append(
             Event(
                 timestamp=segment.start,
                 duration=duration,
                 data={
-                    "app": segment.app_name,
-                    "title": segment.app_name,
+                    "app": app_name,
+                    "title": app_name,
                     "usage_seconds": segment.duration_seconds,
                 },
             )
@@ -853,6 +908,8 @@ def sync_days(
     start_time: int,
     wake_up_time: int,
     backup_intervals: list[tuple[int, int]],
+    app_name_suffix: str = "",
+    app_name_suffix_overrides: dict[str, str] | None = None,
     debug: bool = False,
 ) -> tuple[int, str | None]:
     app_bucket_id = f"aw-watcher-window_{client_hostname}"
@@ -876,6 +933,8 @@ def sync_days(
             start_time=start_time,
             wake_up_time=wake_up_time,
             backup_intervals=backup_intervals,
+            app_name_suffix=app_name_suffix,
+            app_name_suffix_overrides=app_name_suffix_overrides,
             debug=debug,
         )
         if not app_events and not grouped_entries[date_text]:
@@ -927,6 +986,7 @@ def main() -> int:
         "aw_bucket_hostname",
         default=None,
     )
+    aw_app_name_suffix, aw_app_name_suffix_overrides = get_activitywatch_app_name_suffix_config(config)
     start_time = parse_clock_minutes(get_config_value(config, "start_time", default=0), field_name="start_time")
     wake_up_time = parse_clock_minutes(
         get_config_value(config, "wake_up_time", default=600),
@@ -979,6 +1039,8 @@ def main() -> int:
             start_time=start_time,
             wake_up_time=wake_up_time,
             backup_intervals=backup_intervals,
+            app_name_suffix=aw_app_name_suffix,
+            app_name_suffix_overrides=aw_app_name_suffix_overrides,
             debug=debug,
         )
     except Exception as exc:

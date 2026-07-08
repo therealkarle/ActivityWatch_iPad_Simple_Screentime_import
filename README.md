@@ -46,6 +46,8 @@ python -m pip install aw-client aw-core
    - `activitywatch_base_url` to your local ActivityWatch server URL
    - `activitywatch_hostname` to the client name you want to use for bucket IDs
    - `activitywatch_bucket_hostname` to the host name that should own the imported buckets in ActivityWatch
+   - `activitywatch_app_name_suffix` to the suffix appended to every imported app name, for example ` - FlorianIPad`
+   - `activitywatch_app_name_suffix_overrides` to a JSON object that maps exact raw app names to custom suffixes, for example `{"Safari": " - Private"}`
    - `start_time` to the first local clock time the synthetic day may start, using `HHMM` notation such as `0` or `600`
    - `wake_up_time` to the local time where the importer should start preferring backup windows, also in `HHMM`
    - `backup_intervals` to a semicolon-separated list like `[2200;2400]; [1200;1300]`
