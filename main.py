@@ -76,6 +76,17 @@ def log_debug(enabled: bool, message: str) -> None:
         print(f"[debug] {message}")
 
 
+def configure_console_output() -> None:
+    # Use a tolerant error handler so hidden Unicode characters do not crash Windows console writes.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
+
 def resolve_path(raw_value: str | Path, base_dir: Path) -> Path:
     path = Path(raw_value)
     if path.is_absolute():
@@ -1065,6 +1076,8 @@ def sync_days(
 
 
 def main() -> int:
+    configure_console_output()
+
     try:
         config = load_config()
     except Exception as exc:
